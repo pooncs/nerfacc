@@ -42,7 +42,7 @@ def test_pdf_query():
     rays_d = torch.randn((n_rays, 3), device=device)
     rays_d = rays_d / rays_d.norm(dim=-1, keepdim=True)
 
-    ray_indices, t_starts, t_ends = ray_marching(
+    ray_indices, t_starts, t_ends, _ = ray_marching(
         rays_o,
         rays_d,
         near_plane=0.1,

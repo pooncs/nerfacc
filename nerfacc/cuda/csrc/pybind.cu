@@ -77,8 +77,9 @@ torch::Tensor ray_pdf_query(
 torch::Tensor unpack_data(
     torch::Tensor packed_info,
     torch::Tensor data,
-    int n_samples_per_ray);
-
+    int n_samples_per_ray,
+    float pad_value);
+    
 // cub implementations: parallel across samples
 bool is_cub_available() {
     return (bool) CUB_SUPPORTS_SCAN_BY_KEY();

@@ -18,7 +18,14 @@ from datasets.utils import Rays, namedtuple_map
 from radiance_fields.ngp import NGPradianceField
 from utils import set_random_seed
 
-from nerfacc import ContractionType, pack_info, ray_marching, rendering
+from nerfacc import (
+    ContractionType,
+    OccupancyGrid,
+    pack_info,
+    ray_marching,
+    rendering,
+    unpack_data,
+)
 from nerfacc.cuda import ray_pdf_query
 
 
@@ -28,11 +35,41 @@ def set_random_seed(seed):
     torch.manual_seed(seed)
 
 
+def outer(
+    t0_starts: torch.Tensor,
+    t0_ends: torch.Tensor,
+    t1_starts: torch.Tensor,
+    t1_ends: torch.Tensor,
+    y1: torch.Tensor,
+) -> torch.Tensor:
+    cy1 = torch.cat(
+        [torch.zeros_like(y1[..., :1]), torch.cumsum(y1, dim=-1)], dim=-1
+    )
+
+    idx_lo = (
+        torch.searchsorted(
+            t1_starts.contiguous(), t0_starts.contiguous(), side="right"
+        )
+        - 1
+    )
+    idx_lo = torch.clamp(idx_lo, min=0, max=y1.shape[-1] - 1)
+    idx_hi = torch.searchsorted(
+        t1_ends.contiguous(), t0_ends.contiguous(), side="right"
+    )
+    idx_hi = torch.clamp(idx_hi, min=0, max=y1.shape[-1] - 1)
+    cy1_lo = torch.take_along_dim(cy1[..., :-1], idx_lo, dim=-1)
+    cy1_hi = torch.take_along_dim(cy1[..., 1:], idx_hi, dim=-1)
+    y0_outer = cy1_hi - cy1_lo
+
+    return y0_outer
+
+
 # @profile
 def render_image(
     # scene
     radiance_field: torch.nn.Module,
     proposal_nets: torch.nn.Module,
+    occupancy_grid: OccupancyGrid,
     rays: Rays,
     scene_aabb: torch.Tensor,
     # rendering options
@@ -86,7 +123,7 @@ def render_image(
             chunk_rays.origins,
             chunk_rays.viewdirs,
             scene_aabb=scene_aabb,
-            grid=None,
+            grid=occupancy_grid,
             # proposal density fns: {t_starts, t_ends, ray_indices} -> density
             proposal_sigma_fns=[
                 lambda t_starts, t_ends, ray_indices: sigma_fn(
@@ -179,7 +216,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--test_chunk_size",
         type=int,
-        default=1024,
+        default=8192,
     )
     parser.add_argument(
         "--unbounded",
@@ -206,11 +243,13 @@ if __name__ == "__main__":
         target_sample_batch_size = 1 << 20
         train_dataset_kwargs = {"color_bkgd_aug": "random", "factor": 4}
         test_dataset_kwargs = {"factor": 4}
+        grid_resolution = 256
     else:
         from datasets.nerf_synthetic import SubjectLoader
 
         data_root_fp = "/home/ruilongli/data/nerf_synthetic/"
         target_sample_batch_size = 1 << 18
+        grid_resolution = 128
 
     train_dataset = SubjectLoader(
         subject_id=args.scene,
@@ -278,10 +317,10 @@ if __name__ == "__main__":
             #     aabb=args.aabb,
             #     use_viewdirs=False,
             #     hidden_dim=16,
-            #     max_res=64,
+            #     max_res=256,
             #     geo_feat_dim=0,
-            #     n_levels=4,
-            #     log2_hashmap_size=19,
+            #     n_levels=5,
+            #     log2_hashmap_size=21,
             # ),
             # NGPradianceField(
             #     aabb=args.aabb,
@@ -303,15 +342,30 @@ if __name__ == "__main__":
         unbounded=args.unbounded,
     ).to(device)
     optimizer = torch.optim.Adam(
-        list(radiance_field.parameters()) + list(proposal_nets.parameters()),
-        lr=1e-2,
-        eps=1e-15,
+        [
+            {
+                "params": radiance_field.parameters(),
+                "lr": 1e-2,
+                "eps": 1e-15,
+            },
+            {
+                "params": proposal_nets.parameters(),
+                "lr": 1e-2,
+                "eps": 1e-15,
+            },
+        ]
     )
     scheduler = torch.optim.lr_scheduler.MultiStepLR(
         optimizer,
         milestones=[max_steps // 2, max_steps * 3 // 4, max_steps * 9 // 10],
         gamma=0.33,
     )
+
+    occupancy_grid = OccupancyGrid(
+        roi_aabb=args.aabb,
+        resolution=grid_resolution,
+        contraction_type=contraction_type,
+    ).to(device)
 
     # training
     step = 0
@@ -321,102 +375,144 @@ if __name__ == "__main__":
             radiance_field.train()
             proposal_nets.train()
 
-            # @profile
-            def _train():
-                data = train_dataset[i]
+            data = train_dataset[i]
 
-                render_bkgd = data["color_bkgd"]
-                rays = data["rays"]
-                pixels = data["pixels"]
+            render_bkgd = data["color_bkgd"]
+            rays = data["rays"]
+            pixels = data["pixels"]
 
-                # render
-                (
-                    rgb,
-                    acc,
-                    depth,
-                    n_rendering_samples,
-                    proposal_sample_list,
-                ) = render_image(
-                    radiance_field,
-                    proposal_nets,
-                    rays,
-                    scene_aabb,
-                    # rendering options
-                    near_plane=near_plane,
-                    far_plane=far_plane,
-                    render_step_size=render_step_size,
-                    render_bkgd=render_bkgd,
-                    cone_angle=args.cone_angle,
-                    alpha_thre=min(alpha_thre, alpha_thre * step / 1000),
-                    proposal_nets_require_grads=(step < 100 or step % 16 == 0),
-                )
-                # if n_rendering_samples == 0:
-                #     continue
-
-                # dynamic batch size for rays to keep sample batch size constant.
-                num_rays = len(pixels)
-                num_rays = int(
-                    num_rays
-                    * (target_sample_batch_size / float(n_rendering_samples))
-                )
-                train_dataset.update_num_rays(num_rays)
-                alive_ray_mask = acc.squeeze(-1) > 0
-
-                # compute loss
-                loss = F.smooth_l1_loss(
-                    rgb[alive_ray_mask], pixels[alive_ray_mask]
-                )
-
-                (
-                    packed_info,
-                    t_starts,
-                    t_ends,
-                    weights,
-                ) = proposal_sample_list[-1]
-                loss_interval = 0.0
-                for (
-                    proposal_packed_info,
-                    proposal_t_starts,
-                    proposal_t_ends,
-                    proposal_weights,
-                ) in proposal_sample_list[:-1]:
-                    proposal_weights_gt = ray_pdf_query(
-                        packed_info,
-                        t_starts,
-                        t_ends,
-                        weights.detach(),
-                        proposal_packed_info,
-                        proposal_t_starts,
-                        proposal_t_ends,
-                    ).detach()
-
-                    loss_interval = (
-                        torch.clamp(
-                            proposal_weights_gt - proposal_weights, min=0
+            def occ_eval_fn(x):
+                if args.cone_angle > 0.0:
+                    # randomly sample a camera for computing step size.
+                    camera_ids = torch.randint(
+                        0, len(train_dataset), (x.shape[0],), device=device
+                    )
+                    origins = train_dataset.camtoworlds[camera_ids, :3, -1]
+                    t = (origins - x).norm(dim=-1, keepdim=True)
+                    # compute actual step size used in marching, based on the distance to the camera.
+                    step_size = torch.clamp(
+                        t * args.cone_angle, min=render_step_size
+                    )
+                    # filter out the points that are not in the near far plane.
+                    if (near_plane is not None) and (far_plane is not None):
+                        step_size = torch.where(
+                            (t > near_plane) & (t < far_plane),
+                            step_size,
+                            torch.zeros_like(step_size),
                         )
-                    ) ** 2 / (proposal_weights + torch.finfo(torch.float32).eps)
-                    loss_interval = loss_interval.mean()
-                    loss += loss_interval * 1.0
+                else:
+                    step_size = render_step_size
+                # compute occupancy
+                density = radiance_field.query_density(x)
+                return density * step_size
 
-                optimizer.zero_grad()
-                # do not unscale it because we are using Adam.
-                grad_scaler.scale(loss).backward()
-                optimizer.step()
-                scheduler.step()
+            # update occupancy grid
+            occupancy_grid.every_n_step(step=step, occ_eval_fn=occ_eval_fn)
 
-                if step % 100 == 0:
-                    elapsed_time = time.time() - tic
-                    loss = F.mse_loss(
-                        rgb[alive_ray_mask], pixels[alive_ray_mask]
-                    )
-                    print(
-                        f"elapsed_time={elapsed_time:.2f}s | step={step} | "
-                        f"loss={loss:.5f} | loss_interval={loss_interval:.5f} "
-                        f"alive_ray_mask={alive_ray_mask.long().sum():d} | "
-                        f"n_rendering_samples={n_rendering_samples:d} | num_rays={len(pixels):d} |"
-                    )
+            # render
+            (
+                rgb,
+                acc,
+                depth,
+                n_rendering_samples,
+                proposal_sample_list,
+            ) = render_image(
+                radiance_field,
+                proposal_nets,
+                occupancy_grid,
+                rays,
+                scene_aabb,
+                # rendering options
+                near_plane=near_plane,
+                far_plane=far_plane,
+                render_step_size=render_step_size,
+                render_bkgd=render_bkgd,
+                cone_angle=args.cone_angle,
+                alpha_thre=min(alpha_thre, alpha_thre * step / 1000),
+                proposal_nets_require_grads=(step < 1000 or step % 20 == 0),
+            )
+            if n_rendering_samples == 0:
+                continue
 
-            _train()
+            # dynamic batch size for rays to keep sample batch size constant.
+            num_rays = len(pixels)
+            num_rays = int(
+                num_rays
+                * (target_sample_batch_size / float(n_rendering_samples))
+            )
+            train_dataset.update_num_rays(num_rays)
+            alive_ray_mask = acc.squeeze(-1) > 0
+
+            # compute loss
+            loss = F.smooth_l1_loss(rgb[alive_ray_mask], pixels[alive_ray_mask])
+
+            (
+                packed_info,
+                t_starts,
+                t_ends,
+                weights,
+            ) = proposal_sample_list[-1]
+            weights = unpack_data(packed_info, weights, 32).squeeze(-1).detach()
+            loss_interval = 0.0
+            for (
+                proposal_packed_info,
+                proposal_t_starts,
+                proposal_t_ends,
+                proposal_weights,
+            ) in proposal_sample_list[:-1]:
+
+                weights_gt = outer(
+                    unpack_data(packed_info, t_starts, 32, 1e10).squeeze(-1),
+                    unpack_data(packed_info, t_ends, 32, 1e10).squeeze(-1),
+                    unpack_data(
+                        proposal_packed_info, proposal_t_starts, 256, 1e10
+                    ).squeeze(-1),
+                    unpack_data(
+                        proposal_packed_info, proposal_t_ends, 256, 1e10
+                    ).squeeze(-1),
+                    unpack_data(
+                        proposal_packed_info, proposal_weights, 256
+                    ).squeeze(-1),
+                )
+
+                # proposal_weights_gt = ray_pdf_query(
+                #     packed_info,
+                #     t_starts,
+                #     t_ends,
+                #     weights,
+                #     proposal_packed_info,
+                #     proposal_t_starts,
+                #     proposal_t_ends,
+                # ).detach()
+
+                loss_interval = (
+                    torch.clamp(weights - weights_gt, min=0)
+                ) ** 2 / torch.clamp(weights, min=1e-10)
+                loss_interval = loss_interval.mean()
+                loss += loss_interval * 1.0
+                # print(
+                #     proposal_weights_gt.mean(),
+                #     proposal_weights.mean(),
+                #     loss_interval,
+                # )
+
+            optimizer.zero_grad()
+            # do not unscale it because we are using Adam.
+            grad_scaler.scale(loss).backward()
+            # grad_scaler.step(optimizer)
+            # grad_scaler.update()
+            optimizer.step()
+            scheduler.step()
+
+            if step % 100 == 0:
+                elapsed_time = time.time() - tic
+                loss = F.mse_loss(rgb[alive_ray_mask], pixels[alive_ray_mask])
+                print(
+                    f"elapsed_time={elapsed_time:.2f}s | step={step} | "
+                    f"loss={loss:.5f} | loss_interval={loss_interval:.5f} "
+                    f"alive_ray_mask={alive_ray_mask.long().sum():d} | "
+                    f"n_rendering_samples={n_rendering_samples:d} | num_rays={len(pixels):d} |"
+                )
 
             if step >= 0 and step % 1000 == 0 and step > 0:
                 # evaluation
@@ -435,6 +531,7 @@ if __name__ == "__main__":
                         rgb, acc, depth, _, _ = render_image(
                             radiance_field,
                             proposal_nets,
+                            occupancy_grid,
                             rays,
                             scene_aabb,
                             # rendering options
@@ -451,17 +548,18 @@ if __name__ == "__main__":
                         mse = F.mse_loss(rgb, pixels)
                         psnr = -10.0 * torch.log(mse) / np.log(10.0)
                         psnrs.append(psnr.item())
-                        imageio.imwrite(
-                            "acc_binary_test.png",
-                            ((acc > 0).float().cpu().numpy() * 255).astype(
-                                np.uint8
-                            ),
-                        )
-                        imageio.imwrite(
-                            "rgb_test.png",
-                            (rgb.cpu().numpy() * 255).astype(np.uint8),
-                        )
-                        break
+                        if step != max_steps:
+                            imageio.imwrite(
+                                "acc_binary_test.png",
+                                ((acc > 0).float().cpu().numpy() * 255).astype(
+                                    np.uint8
+                                ),
+                            )
+                            imageio.imwrite(
+                                "rgb_test.png",
+                                (rgb.cpu().numpy() * 255).astype(np.uint8),
+                            )
+                            break
                 psnr_avg = sum(psnrs) / len(psnrs)
                 print(f"evaluation: psnr_avg={psnr_avg}")
                 train_dataset.training = True

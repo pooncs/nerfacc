@@ -41,13 +41,13 @@ __global__ void pdf_query_kernel(
     resample_pdfs += resample_base;
 
     // which interval is resample_start (t0) located
-    int t0_id = -1;
-    scalar_t t0_start = 0.0f, t0_end = starts[0];
-    scalar_t cdf0_start = 0.0f, cdf0_end = 0.0f;
+    int t0_id = 0;
+    scalar_t t0_start = starts[0], t0_end = ends[0];
+    scalar_t cdf0_start = 0.0f, cdf0_end = pdfs[0];
     // which interval is resample_end (t1) located
-    int t1_id = -1;
-    scalar_t t1_start = 0.0f, t1_end = starts[0];
-    scalar_t cdf1_start = 0.0f, cdf1_end = 0.0f;
+    int t1_id = 0;
+    scalar_t t1_start = starts[0], t1_end = ends[0];
+    scalar_t cdf1_start = 0.0f, cdf1_end = pdfs[0];
     // go!
     for (int j = 0; j < resample_steps; ++j)
     {
@@ -59,10 +59,10 @@ __global__ void pdf_query_kernel(
             cdf0_start = cdf0_end;
             cdf0_end += pdfs[t0_id];
         } 
-        if (t0 > t0_end) {
-            resample_pdfs[j] = 0.0f;
-            continue;
-        }
+        // if (t0 > t0_end) {
+        //     resample_pdfs[j] = 0.0f;
+        //     continue;
+        // }
         scalar_t pct0 = 0.0f;  // max(t0 - t0_start, 0.0f) / max(t0_end - t0_start, 1e-10f);
         scalar_t resample_cdf_start = cdf0_start + pct0 * (cdf0_end - cdf0_start);
 
@@ -74,10 +74,10 @@ __global__ void pdf_query_kernel(
             cdf1_start = cdf1_end;
             cdf1_end += pdfs[t1_id];
         } 
-        if (t1 > t1_end) {
-            resample_pdfs[j] = cdf1_end - resample_cdf_start;
-            continue;
-        }
+        // if (t1 > t1_end) {
+        //     resample_pdfs[j] = cdf1_end - resample_cdf_start;
+        //     continue;
+        // }
         scalar_t pct1 = 1.0f;  // max(t1 - t1_start, 0.0f) / max(t1_end - t1_start, 1e-10f);
         scalar_t resample_cdf_end = cdf1_start + pct1 * (cdf1_end - cdf1_start);
 
@@ -119,16 +119,16 @@ __global__ void cdf_resampling_kernel(
     scalar_t w_sum = 0.0f;
     for (int j = 0; j < steps; j++)
         w_sum += w[j];
-    // scalar_t padding = fmaxf(1e-10f - weights_sum, 0.0f);
-    // scalar_t padding_step = padding / steps;
-    // weights_sum += padding;
+    scalar_t padding = fmaxf(1e-10f - w_sum, 0.0f);
+    scalar_t padding_step = padding / steps;
+    w_sum += padding;
 
     int num_endpoints = resample_steps + 1;
     scalar_t cdf_pad = 1.0f / (2 * num_endpoints);
     scalar_t cdf_step_size = (1.0f - 2 * cdf_pad) / resample_steps;
 
     int idx = 0, j = 0;
-    scalar_t cdf_prev = 0.0f, cdf_next = w[idx] / w_sum;
+    scalar_t cdf_prev = 0.0f, cdf_next = (w[idx] + padding_step) / w_sum;
     scalar_t cdf_u = cdf_pad;
     while (j < num_endpoints)
     {
@@ -156,14 +156,18 @@ __global__ void cdf_resampling_kernel(
         {
             // going to next interval
             idx += 1;
+            if (idx >= steps) {
+                printf("Error: idx: %d, steps: %d, j: %d, num_endpoints: %d, cdf_u: %f, cdf_next: %f, cdf_prev: %f\n", idx, steps, j, num_endpoints, cdf_u, cdf_next, cdf_prev);
+                return;
+            }
             cdf_prev = cdf_next;
-            cdf_next += w[idx] / w_sum;
+            cdf_next += (w[idx] + padding_step) / w_sum;
         }
     }
-    // if (j != num_endpoints)
-    // {
-    //     printf("Error: %d %d %f\n", j, num_endpoints, weights_sum);
-    // }
+    if (j != num_endpoints)
+    {
+        printf("Error: %d %d %f\n", j, num_endpoints, w_sum);
+    }
     return;
 }
 
@@ -265,8 +269,8 @@ std::vector<torch::Tensor> ray_resampling(
     const int blocks = CUDA_N_BLOCKS_NEEDED(n_rays, threads);
 
     torch::Tensor num_steps = torch::split(packed_info, 1, 1)[1];
-    // torch::Tensor resample_num_steps = (num_steps > 0).to(num_steps.options()) * steps;
-    torch::Tensor resample_num_steps = torch::clamp(num_steps, 0, steps);
+    torch::Tensor resample_num_steps = (num_steps > 0).to(num_steps.options()) * steps;
+    // torch::Tensor resample_num_steps = torch::clamp(num_steps, 0, steps);
     torch::Tensor resample_cum_steps = resample_num_steps.cumsum(0, torch::kInt32);
     torch::Tensor resample_packed_info = torch::cat(
         {resample_cum_steps - resample_num_steps, resample_num_steps}, 1);
