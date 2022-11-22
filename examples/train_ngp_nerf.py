@@ -216,7 +216,7 @@ if __name__ == "__main__":
             occupancy_grid.every_n_step(step=step, occ_eval_fn=occ_eval_fn)
 
             # render
-            rgb, acc, depth, n_rendering_samples = render_image(
+            rgb, acc, depth, n_rendering_samples, _ = render_image(
                 radiance_field,
                 occupancy_grid,
                 rays,
@@ -273,7 +273,7 @@ if __name__ == "__main__":
                         pixels = data["pixels"]
 
                         # rendering
-                        rgb, acc, depth, _ = render_image(
+                        rgb, acc, depth, _, _ = render_image(
                             radiance_field,
                             occupancy_grid,
                             rays,

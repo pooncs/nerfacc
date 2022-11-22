@@ -7,32 +7,16 @@ import math
 import os
 import random
 import time
-from typing import Optional
 
 import imageio
 import numpy as np
 import torch
 import torch.nn.functional as F
 import tqdm
-from datasets.utils import Rays, namedtuple_map
 from radiance_fields.ngp import NGPradianceField
-from utils import set_random_seed
+from utils import render_image, set_random_seed
 
-from nerfacc import (
-    ContractionType,
-    OccupancyGrid,
-    pack_info,
-    ray_marching,
-    rendering,
-    unpack_data,
-)
-from nerfacc.cuda import ray_pdf_query
-
-
-def set_random_seed(seed):
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
+from nerfacc import ContractionType, OccupancyGrid, unpack_data
 
 
 def outer(
@@ -62,111 +46,6 @@ def outer(
     y0_outer = cy1_hi - cy1_lo
 
     return y0_outer
-
-
-# @profile
-def render_image(
-    # scene
-    radiance_field: torch.nn.Module,
-    proposal_nets: torch.nn.Module,
-    occupancy_grid: OccupancyGrid,
-    rays: Rays,
-    scene_aabb: torch.Tensor,
-    # rendering options
-    near_plane: Optional[float] = None,
-    far_plane: Optional[float] = None,
-    render_step_size: float = 1e-3,
-    render_bkgd: Optional[torch.Tensor] = None,
-    cone_angle: float = 0.0,
-    alpha_thre: float = 0.0,
-    proposal_nets_require_grads: bool = True,
-    # test options
-    test_chunk_size: int = 8192,
-):
-    """Render the pixels of an image."""
-    rays_shape = rays.origins.shape
-    if len(rays_shape) == 3:
-        height, width, _ = rays_shape
-        num_rays = height * width
-        rays = namedtuple_map(
-            lambda r: r.reshape([num_rays] + list(r.shape[2:])), rays
-        )
-    else:
-        num_rays, _ = rays_shape
-
-    def sigma_fn(t_starts, t_ends, ray_indices, net=None):
-        ray_indices = ray_indices.long()
-        t_origins = chunk_rays.origins[ray_indices]
-        t_dirs = chunk_rays.viewdirs[ray_indices]
-        positions = t_origins + t_dirs * (t_starts + t_ends) / 2.0
-        if net is not None:
-            return net.query_density(positions)
-        else:
-            return radiance_field.query_density(positions)
-
-    def rgb_sigma_fn(t_starts, t_ends, ray_indices):
-        ray_indices = ray_indices.long()
-        t_origins = chunk_rays.origins[ray_indices]
-        t_dirs = chunk_rays.viewdirs[ray_indices]
-        positions = t_origins + t_dirs * (t_starts + t_ends) / 2.0
-        return radiance_field(positions, t_dirs)
-
-    results = []
-    chunk = (
-        torch.iinfo(torch.int32).max
-        if radiance_field.training
-        else test_chunk_size
-    )
-    for i in range(0, num_rays, chunk):
-        chunk_rays = namedtuple_map(lambda r: r[i : i + chunk], rays)
-        ray_indices, t_starts, t_ends, proposal_sample_list = ray_marching(
-            chunk_rays.origins,
-            chunk_rays.viewdirs,
-            scene_aabb=scene_aabb,
-            grid=occupancy_grid,
-            # proposal density fns: {t_starts, t_ends, ray_indices} -> density
-            proposal_sigma_fns=[
-                lambda t_starts, t_ends, ray_indices: sigma_fn(
-                    t_starts, t_ends, ray_indices, proposal_net
-                )
-                for proposal_net in proposal_nets
-            ],
-            proposal_n_samples=[32],
-            proposal_require_grads=proposal_nets_require_grads,
-            sigma_fn=sigma_fn,
-            near_plane=near_plane,
-            far_plane=far_plane,
-            render_step_size=render_step_size,
-            stratified=radiance_field.training,
-            cone_angle=cone_angle,
-            alpha_thre=alpha_thre,
-        )
-        rgb, opacity, depth, weights = rendering(
-            t_starts,
-            t_ends,
-            ray_indices=ray_indices,
-            n_rays=len(chunk_rays.origins),
-            rgb_sigma_fn=rgb_sigma_fn,
-            render_bkgd=render_bkgd,
-        )
-        if radiance_field.training:
-            packed_info = pack_info(ray_indices, n_rays=len(chunk_rays.origins))
-            proposal_sample_list.append(
-                (packed_info, t_starts, t_ends, weights)
-            )
-        chunk_results = [rgb, opacity, depth, len(t_starts)]
-        results.append(chunk_results)
-    colors, opacities, depths, n_rendering_samples = [
-        torch.cat(r, dim=0) if isinstance(r[0], torch.Tensor) else r
-        for r in zip(*results)
-    ]
-    return (
-        colors.view((*rays_shape[:-1], -1)),
-        opacities.view((*rays_shape[:-1], -1)),
-        depths.view((*rays_shape[:-1], -1)),
-        sum(n_rendering_samples),
-        proposal_sample_list if radiance_field.training else None,
-    )
 
 
 if __name__ == "__main__":
@@ -231,7 +110,7 @@ if __name__ == "__main__":
     parser.add_argument("--cone_angle", type=float, default=0.0)
     args = parser.parse_args()
 
-    render_n_samples = 256
+    render_n_samples = 512
 
     # setup the dataset
     train_dataset_kwargs = {}
@@ -240,7 +119,7 @@ if __name__ == "__main__":
         from datasets.nerf_360_v2 import SubjectLoader
 
         data_root_fp = "/home/ruilongli/data/360_v2/"
-        target_sample_batch_size = 1 << 20
+        target_sample_batch_size = 1 << 18
         train_dataset_kwargs = {"color_bkgd_aug": "random", "factor": 4}
         test_dataset_kwargs = {"factor": 4}
         grid_resolution = 256
@@ -305,25 +184,29 @@ if __name__ == "__main__":
         ).item()
         alpha_thre = 1e-2
 
+    proposal_n_samples = [32]
     proposal_nets = torch.nn.ModuleList(
         [
+            # NGPradianceField(
+            #     aabb=args.aabb,
+            #     unbounded=args.unbounded,
+            #     use_viewdirs=False,
+            #     hidden_dim=0,
+            #     geo_feat_dim=0,
+            # ),
             NGPradianceField(
                 aabb=args.aabb,
+                unbounded=args.unbounded,
                 use_viewdirs=False,
-                hidden_dim=0,
+                hidden_dim=16,
+                max_res=256,
                 geo_feat_dim=0,
+                n_levels=4,
+                log2_hashmap_size=21,
             ),
             # NGPradianceField(
             #     aabb=args.aabb,
-            #     use_viewdirs=False,
-            #     hidden_dim=16,
-            #     max_res=256,
-            #     geo_feat_dim=0,
-            #     n_levels=5,
-            #     log2_hashmap_size=21,
-            # ),
-            # NGPradianceField(
-            #     aabb=args.aabb,
+            # .   unbounded=args.unbounded,
             #     use_viewdirs=False,
             #     hidden_dim=16,
             #     max_res=256,
@@ -415,13 +298,15 @@ if __name__ == "__main__":
                 acc,
                 depth,
                 n_rendering_samples,
-                proposal_sample_list,
+                proposal_samples,
             ) = render_image(
                 radiance_field,
-                proposal_nets,
                 occupancy_grid,
                 rays,
                 scene_aabb,
+                proposal_nets=proposal_nets,
+                proposal_n_samples=proposal_n_samples,
+                proposal_require_grads=(step < 1000 or step % 20 == 0),
                 # rendering options
                 near_plane=near_plane,
                 far_plane=far_plane,
@@ -429,7 +314,6 @@ if __name__ == "__main__":
                 render_bkgd=render_bkgd,
                 cone_angle=args.cone_angle,
                 alpha_thre=min(alpha_thre, alpha_thre * step / 1000),
-                proposal_nets_require_grads=(step < 1000 or step % 20 == 0),
             )
             if n_rendering_samples == 0:
                 continue
@@ -451,27 +335,39 @@ if __name__ == "__main__":
                 t_starts,
                 t_ends,
                 weights,
-            ) = proposal_sample_list[-1]
-            weights = unpack_data(packed_info, weights, 32).squeeze(-1).detach()
+            ) = proposal_samples[-1]
+            weights = (
+                unpack_data(packed_info, weights, None).squeeze(-1).detach()
+            )
             loss_interval = 0.0
             for (
                 proposal_packed_info,
                 proposal_t_starts,
                 proposal_t_ends,
                 proposal_weights,
-            ) in proposal_sample_list[:-1]:
+            ) in proposal_samples[:-1]:
 
                 weights_gt = outer(
-                    unpack_data(packed_info, t_starts, 32, 1e10).squeeze(-1),
-                    unpack_data(packed_info, t_ends, 32, 1e10).squeeze(-1),
+                    unpack_data(packed_info, t_starts, None, 1e10).squeeze(-1),
+                    unpack_data(packed_info, t_ends, None, 1e10).squeeze(-1),
                     unpack_data(
-                        proposal_packed_info, proposal_t_starts, 256, 1e10
+                        proposal_packed_info,
+                        proposal_t_starts,
+                        # render_n_samples,
+                        None,
+                        1e10,
                     ).squeeze(-1),
                     unpack_data(
-                        proposal_packed_info, proposal_t_ends, 256, 1e10
+                        proposal_packed_info,
+                        proposal_t_ends,
+                        # render_n_samples,
+                        None,
+                        1e10,
                     ).squeeze(-1),
                     unpack_data(
-                        proposal_packed_info, proposal_weights, 256
+                        proposal_packed_info,
+                        proposal_weights,
+                        # render_n_samples,
                     ).squeeze(-1),
                 )
 
@@ -490,11 +386,6 @@ if __name__ == "__main__":
                 ) ** 2 / torch.clamp(weights, min=1e-10)
                 loss_interval = loss_interval.mean()
                 loss += loss_interval * 1.0
-                # print(
-                #     proposal_weights_gt.mean(),
-                #     proposal_weights.mean(),
-                #     loss_interval,
-                # )
 
             optimizer.zero_grad()
             # do not unscale it because we are using Adam.
@@ -530,10 +421,12 @@ if __name__ == "__main__":
                         # rendering
                         rgb, acc, depth, _, _ = render_image(
                             radiance_field,
-                            proposal_nets,
                             occupancy_grid,
                             rays,
                             scene_aabb,
+                            proposal_nets=proposal_nets,
+                            proposal_n_samples=proposal_n_samples,
+                            proposal_require_grads=False,
                             # rendering options
                             near_plane=near_plane,
                             far_plane=far_plane,
@@ -541,7 +434,6 @@ if __name__ == "__main__":
                             render_bkgd=render_bkgd,
                             cone_angle=args.cone_angle,
                             alpha_thre=alpha_thre,
-                            proposal_nets_require_grads=False,
                             # test options
                             test_chunk_size=args.test_chunk_size,
                         )
