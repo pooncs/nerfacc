@@ -110,6 +110,8 @@ def proposal_resampling(
     proposal_sigma_fns: Tuple[Callable, ...] = [],
     proposal_n_samples: Tuple[int, ...] = [],
     proposal_require_grads: bool = False,
+    t_to_s_fn: Callable = lambda x: x,
+    s_to_t_fn: Callable = lambda x: x,
     # acceleration options
     early_stop_eps: float = 1e-4,
     alpha_thre: float = 0.0,
@@ -160,13 +162,15 @@ def proposal_resampling(
                 )
 
         # Resampling on filtered samples
-        packed_info, t_starts, t_ends = ray_resampling(
+        packed_info, s_starts, s_ends = ray_resampling(
             packed_info,
-            t_starts,
-            t_ends,
+            t_to_s_fn(t_starts),
+            t_to_s_fn(t_ends),
             weights + 0.01,
             n_samples=n_samples,
         )
+        t_starts = s_to_t_fn(s_starts)
+        t_ends = s_to_t_fn(s_ends)
         ray_indices = unpack_info(packed_info, t_starts.shape[0])
 
     # last round filtering with sigma_fn

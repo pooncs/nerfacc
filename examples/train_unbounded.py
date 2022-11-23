@@ -7,6 +7,7 @@ import math
 import os
 import random
 import time
+from typing import Callable, Optional, Tuple
 
 import imageio
 import numpy as np
@@ -14,10 +15,248 @@ import torch
 import torch.nn.functional as F
 import tqdm
 from datasets.nerf_360_v2 import SubjectLoader
+from datasets.utils import Rays, namedtuple_map
 from radiance_fields.ngp import NGPradianceField
 from utils import render_image, set_random_seed
 
-from nerfacc import ContractionType, OccupancyGrid, unpack_data
+from nerfacc import (
+    ContractionType,
+    Grid,
+    OccupancyGrid,
+    pack_info,
+    render_transmittance_from_alpha,
+    render_weight_from_density,
+    rendering,
+    unpack_data,
+    unpack_info,
+)
+from nerfacc.cdf import ray_resampling
+from nerfacc.sampling import proposal_resampling, sample_along_rays
+
+
+def construct_ray_warps(fn, t_near, t_far):
+    """Construct a bijection between metric distances and normalized distances.
+    See the text around Equation 11 in https://arxiv.org/abs/2111.12077 for a
+    detailed explanation.
+    Args:
+      fn: the function to ray distances.
+      t_near: a tensor of near-plane distances.
+      t_far: a tensor of far-plane distances.
+    Returns:
+      t_to_s: a function that maps distances to normalized distances in [0, 1].
+      s_to_t: the inverse of t_to_s.
+    """
+    if fn is None:
+        fn_fwd = lambda x: x
+        fn_inv = lambda x: x
+    elif fn == "piecewise":
+        # Piecewise spacing combining identity and 1/x functions to allow t_near=0.
+        fn_fwd = lambda x: torch.where(x < 1, 0.5 * x, 1 - 0.5 / x)
+        fn_inv = lambda x: torch.where(x < 0.5, 2 * x, 0.5 / (1 - x))
+    else:
+        inv_mapping = {
+            "reciprocal": torch.reciprocal,
+            "log": torch.exp,
+            "exp": torch.log,
+            "sqrt": torch.square,
+            "square": torch.sqrt,
+        }
+        fn_fwd = fn
+        fn_inv = inv_mapping[fn.__name__]
+
+    s_near, s_far = [fn_fwd(x) for x in (t_near, t_far)]
+    t_to_s = lambda t: (fn_fwd(t) - s_near) / (s_far - s_near)
+    s_to_t = lambda s: fn_inv(s * s_far + (1 - s) * s_near)
+    return t_to_s, s_to_t
+
+
+@torch.no_grad()
+def ray_marching(
+    # rays
+    rays_o: torch.Tensor,
+    rays_d: torch.Tensor,
+    near_plane: float = None,
+    far_plane: float = None,
+    # sigma/alpha function for skipping invisible space
+    sigma_fn: Optional[Callable] = None,
+    # proposal density fns: {t_starts, t_ends, ray_indices} -> density
+    proposal_sigma_fns: Tuple[Callable, ...] = [],
+    proposal_n_samples: Tuple[int, ...] = [],
+    proposal_require_grads: bool = False,
+    early_stop_eps: float = 1e-4,
+    alpha_thre: float = 0.0,
+    # rendering options
+    render_num_steps: int = 256,
+    stratified: bool = False,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Ray marching with space skipping."""
+    n_rays = rays_o.shape[0]
+
+    t_to_s_fn, s_to_t_fn = construct_ray_warps(
+        torch.reciprocal, torch.tensor(near_plane), torch.tensor(far_plane)
+    )
+    sdist = torch.linspace(0, 1, render_num_steps + 1, device=rays_o.device)
+    if stratified:
+        sdist += random.random() / render_num_steps
+    tdist = s_to_t_fn(sdist).expand(n_rays, -1)
+    t_starts = tdist[:, :-1].reshape(-1, 1)
+    t_ends = tdist[:, 1:].reshape(-1, 1)
+    ray_indices = torch.arange(0, n_rays, device=device).repeat_interleave(
+        render_num_steps, dim=0
+    )
+
+    ray_indices, t_starts, t_ends, proposal_samples = proposal_resampling(
+        t_starts=t_starts,
+        t_ends=t_ends,
+        ray_indices=ray_indices,
+        n_rays=n_rays,
+        sigma_fn=sigma_fn,
+        proposal_sigma_fns=proposal_sigma_fns,
+        proposal_n_samples=proposal_n_samples,
+        proposal_require_grads=proposal_require_grads,
+        t_to_s_fn=t_to_s_fn,
+        s_to_t_fn=s_to_t_fn,
+        early_stop_eps=early_stop_eps,
+        alpha_thre=alpha_thre,
+    )
+
+    return ray_indices, t_starts, t_ends, proposal_samples
+
+
+def render_image(
+    # scene
+    radiance_field: torch.nn.Module,
+    occupancy_grid: OccupancyGrid,
+    rays: Rays,
+    scene_aabb: torch.Tensor,
+    # proposal networks
+    proposal_nets: Tuple[torch.nn.Module, ...] = [],
+    proposal_n_samples: Tuple[int, ...] = [],
+    proposal_require_grads: bool = False,
+    # rendering options
+    near_plane: Optional[float] = None,
+    far_plane: Optional[float] = None,
+    render_num_steps: int = 256,
+    render_bkgd: Optional[torch.Tensor] = None,
+    cone_angle: float = 0.0,
+    alpha_thre: float = 0.0,
+    # test options
+    test_chunk_size: int = 8192,
+    # only useful for dnerf
+    timestamps: Optional[torch.Tensor] = None,
+):
+    """Render the pixels of an image."""
+    assert len(proposal_nets) == len(proposal_n_samples), (
+        "proposal_nets and proposal_n_samples must have the same length, "
+        f"but got {len(proposal_nets)} and {len(proposal_n_samples)}."
+    )
+
+    rays_shape = rays.origins.shape
+    if len(rays_shape) == 3:
+        height, width, _ = rays_shape
+        num_rays = height * width
+        rays = namedtuple_map(
+            lambda r: r.reshape([num_rays] + list(r.shape[2:])), rays
+        )
+    else:
+        num_rays, _ = rays_shape
+
+    def sigma_fn(t_starts, t_ends, ray_indices):
+        ray_indices = ray_indices.long()
+        t_origins = chunk_rays.origins[ray_indices]
+        t_dirs = chunk_rays.viewdirs[ray_indices]
+        positions = t_origins + t_dirs * (t_starts + t_ends) / 2.0
+        if timestamps is not None:
+            # dnerf
+            t = (
+                timestamps[ray_indices]
+                if radiance_field.training
+                else timestamps.expand_as(positions[:, :1])
+            )
+            return radiance_field.query_density(positions, t)
+        return radiance_field.query_density(positions)
+
+    def rgb_sigma_fn(t_starts, t_ends, ray_indices):
+        ray_indices = ray_indices.long()
+        t_origins = chunk_rays.origins[ray_indices]
+        t_dirs = chunk_rays.viewdirs[ray_indices]
+        positions = t_origins + t_dirs * (t_starts + t_ends) / 2.0
+        if timestamps is not None:
+            # dnerf
+            t = (
+                timestamps[ray_indices]
+                if radiance_field.training
+                else timestamps.expand_as(positions[:, :1])
+            )
+            return radiance_field(positions, t, t_dirs)
+        return radiance_field(positions, t_dirs)
+
+    def proposal_sigma_fn(t_starts, t_ends, ray_indices, net):
+        ray_indices = ray_indices.long()
+        t_origins = chunk_rays.origins[ray_indices]
+        t_dirs = chunk_rays.viewdirs[ray_indices]
+        positions = t_origins + t_dirs * (t_starts + t_ends) / 2.0
+        if timestamps is not None:
+            # dnerf
+            t = (
+                timestamps[ray_indices]
+                if net.training
+                else timestamps.expand_as(positions[:, :1])
+            )
+            return net.query_density(positions, t)
+        return net.query_density(positions)
+
+    results = []
+    chunk = (
+        torch.iinfo(torch.int32).max
+        if radiance_field.training
+        else test_chunk_size
+    )
+    for i in range(0, num_rays, chunk):
+        chunk_rays = namedtuple_map(lambda r: r[i : i + chunk], rays)
+        ray_indices, t_starts, t_ends, proposal_samples = ray_marching(
+            chunk_rays.origins,
+            chunk_rays.viewdirs,
+            # proposal density fns: {t_starts, t_ends, ray_indices} -> density
+            proposal_sigma_fns=[
+                lambda t_starts, t_ends, ray_indices: proposal_sigma_fn(
+                    t_starts, t_ends, ray_indices, proposal_net
+                )
+                for proposal_net in proposal_nets
+            ],
+            proposal_n_samples=proposal_n_samples,
+            proposal_require_grads=proposal_require_grads,
+            sigma_fn=sigma_fn,
+            near_plane=near_plane,
+            far_plane=far_plane,
+            render_num_steps=render_num_steps,
+            stratified=radiance_field.training,
+            alpha_thre=alpha_thre,
+        )
+        rgb, opacity, depth, weights = rendering(
+            t_starts,
+            t_ends,
+            ray_indices,
+            n_rays=chunk_rays.origins.shape[0],
+            rgb_sigma_fn=rgb_sigma_fn,
+            render_bkgd=render_bkgd,
+        )
+        if radiance_field.training:
+            packed_info = pack_info(ray_indices, n_rays=len(chunk_rays.origins))
+            proposal_samples.append((packed_info, t_starts, t_ends, weights))
+        chunk_results = [rgb, opacity, depth, len(t_starts)]
+        results.append(chunk_results)
+    colors, opacities, depths, n_rendering_samples = [
+        torch.cat(r, dim=0) if isinstance(r[0], torch.Tensor) else r
+        for r in zip(*results)
+    ]
+    return (
+        colors.view((*rays_shape[:-1], -1)),
+        opacities.view((*rays_shape[:-1], -1)),
+        depths.view((*rays_shape[:-1], -1)),
+        sum(n_rendering_samples),
+        proposal_samples if radiance_field.training else None,
+    )
 
 
 def outer(
@@ -107,7 +346,7 @@ if __name__ == "__main__":
     ).tolist()
 
     # setup proposal nets
-    proposal_n_samples = [32]
+    proposal_n_samples = [64]
     proposal_nets = torch.nn.ModuleList(
         [
             # NGPradianceField(
@@ -166,7 +405,7 @@ if __name__ == "__main__":
     # setup hyperparameters
     near_plane = 0.2
     far_plane = 1e4
-    render_step_size = 1e-2
+    render_num_steps = 512
     cone_angle = 1e-2
     alpha_thre = 1e-2
 
@@ -183,32 +422,6 @@ if __name__ == "__main__":
         render_bkgd = data["color_bkgd"]
         rays = data["rays"]
         pixels = data["pixels"]
-
-        def occ_eval_fn(x):
-            if cone_angle > 0.0:
-                # randomly sample a camera for computing step size.
-                camera_ids = torch.randint(
-                    0, len(train_dataset), (x.shape[0],), device=device
-                )
-                origins = train_dataset.camtoworlds[camera_ids, :3, -1]
-                t = (origins - x).norm(dim=-1, keepdim=True)
-                # compute actual step size used in marching, based on the distance to the camera.
-                step_size = torch.clamp(t * cone_angle, min=render_step_size)
-                # filter out the points that are not in the near far plane.
-                if (near_plane is not None) and (far_plane is not None):
-                    step_size = torch.where(
-                        (t > near_plane) & (t < far_plane),
-                        step_size,
-                        torch.zeros_like(step_size),
-                    )
-            else:
-                step_size = render_step_size
-            # compute occupancy
-            density = radiance_field.query_density(x)
-            return density * step_size
-
-        # update occupancy grid
-        occupancy_grid.every_n_step(step=step, occ_eval_fn=occ_eval_fn)
 
         # render
         (
@@ -228,7 +441,7 @@ if __name__ == "__main__":
             # rendering options
             near_plane=near_plane,
             far_plane=far_plane,
-            render_step_size=render_step_size,
+            render_num_steps=render_num_steps,
             render_bkgd=render_bkgd,
             cone_angle=cone_angle,
             alpha_thre=min(alpha_thre, alpha_thre * step / 1000),
@@ -333,7 +546,7 @@ if __name__ == "__main__":
                         # rendering options
                         near_plane=near_plane,
                         far_plane=far_plane,
-                        render_step_size=render_step_size,
+                        render_num_steps=render_num_steps,
                         render_bkgd=render_bkgd,
                         cone_angle=cone_angle,
                         alpha_thre=alpha_thre,
