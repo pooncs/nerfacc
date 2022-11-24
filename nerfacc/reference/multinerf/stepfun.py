@@ -48,7 +48,7 @@ def searchsorted(a, v):
       range [a[0], a[-1]] in which case idx_lo and idx_hi are both the first or
       last index of a.
     """
-    i = torch.arange(a.shape[-1])
+    i = torch.arange(a.shape[-1], device=a.device)
     v_ge_a = v[..., None, :] >= a[..., :, None]
     idx_lo = torch.max(
         torch.where(v_ge_a, i[..., :, None], i[..., :1, None]), dim=-2
@@ -110,7 +110,7 @@ def max_dilate(t, w, dilation, domain=(-torch.inf, torch.inf)):
     """Dilate (via max-pooling) a non-negative step function."""
     t0 = t[..., :-1] - dilation
     t1 = t[..., 1:] + dilation
-    t_dilate = torch.sort(torch.cat([t, t0, t1], dim=-1), dim=-1)
+    t_dilate = torch.sort(torch.cat([t, t0, t1], dim=-1), dim=-1).values
     t_dilate = torch.clamp(t_dilate, *domain)
     w_dilate = torch.max(
         torch.where(
