@@ -18,6 +18,7 @@ from helpers import (
     max_dilate_weights,
     sample_intervals,
 )
+from radiance_fields.mlp import VanillaNeRFRadianceField
 from radiance_fields.ngp import NGPradianceField
 from utils import render_image, set_random_seed
 
@@ -35,6 +36,11 @@ from nerfacc import (
 from nerfacc.cdf import ray_resampling
 from nerfacc.reference.multinerf.coord import construct_ray_warps
 from nerfacc.reference.multinerf.mathutil import clip
+from nerfacc.reference.multinerf.render import (
+    cast_rays,
+    compute_alpha_weights,
+    volumetric_rendering,
+)
 
 # from nerfacc.reference.multinerf.stepfun import (
 #     lossfun_distortion,
@@ -54,7 +60,7 @@ def ray_marching(
     num_prop_samples: int = 64,  # The number of samples for each proposal level.
     num_nerf_samples: int = 32,  # The number of samples the final nerf level.
 ):
-    num_levels = len(proposal_sigma_fns) + 1
+    num_levels = 3  # len(proposal_sigma_fns) + 1
     raydist_fn = torch.reciprocal
     bg_intensity_range: Tuple[float] = (
         1.0,
@@ -81,7 +87,7 @@ def ray_marching(
     )
     single_mlp: bool = False  # Use the NerfMLP for all rounds of sampling.
     resample_padding: float = 0.0  # Dirichlet/alpha "padding" on the histogram.
-    opaque_background: bool = False  # If true, make the background opaque.
+    opaque_background: bool = True  # If true, make the background opaque.
 
     # Define the mapping from normalized to metric ray distance.
     _, s_to_t = construct_ray_warps(raydist_fn, t_min, t_max)
@@ -176,23 +182,17 @@ def ray_marching(
         # Convert normalized distances to metric distances.
         tdist = s_to_t(sdist)
 
-        t_starts = tdist[:, :-1].reshape(-1, 1)
-        t_ends = tdist[:, 1:].reshape(-1, 1)
-        ray_indices = torch.arange(n_rays, device=device).repeat_interleave(
-            num_samples
-        )
-
         if is_prop:
-            sigmas = proposal_sigma_fns[i_level](t_starts, t_ends, ray_indices)
-            weights = render_weight_from_density(
-                t_starts, t_ends, sigmas, ray_indices=ray_indices
-            )
-            # packed_info = pack_info(ray_indices, n_rays=n_rays)
-            # proposal_samples.append((packed_info, t_starts, t_ends, weights))
-            weights = weights.reshape(n_rays, num_samples)
+            sigmas = proposal_sigma_fns[0](tdist)
+            # Get the weights used by volumetric rendering (and our other losses).
+            weights = compute_alpha_weights(
+                sigmas.squeeze(-1),
+                tdist,
+                opaque_background=opaque_background,
+            )[0]
             proposal_samples.append((tdist, weights))
 
-    return ray_indices, t_starts, t_ends, proposal_samples
+    return tdist, proposal_samples
 
 
 def render_image(
@@ -220,18 +220,18 @@ def render_image(
     else:
         num_rays, _ = rays_shape
 
-    def rgb_sigma_fn(t_starts, t_ends, ray_indices):
-        ray_indices = ray_indices.long()
-        t_origins = chunk_rays.origins[ray_indices]
-        t_dirs = chunk_rays.viewdirs[ray_indices]
-        positions = t_origins + t_dirs * (t_starts + t_ends) / 2.0
-        return radiance_field(positions, t_dirs)
+    def rgb_sigma_fn(tdist):
+        t_origins = chunk_rays.origins[:, None, :]
+        t_dirs = chunk_rays.viewdirs[:, None, :]
+        t_mids = (tdist[:, :-1, None] + tdist[:, 1:, None]) / 2.0
+        positions = t_origins + t_dirs * t_mids
+        return radiance_field(positions, t_dirs.expand_as(positions))
 
-    def proposal_sigma_fn(t_starts, t_ends, ray_indices, net):
-        ray_indices = ray_indices.long()
-        t_origins = chunk_rays.origins[ray_indices]
-        t_dirs = chunk_rays.viewdirs[ray_indices]
-        positions = t_origins + t_dirs * (t_starts + t_ends) / 2.0
+    def proposal_sigma_fn(tdist, net):
+        t_origins = chunk_rays.origins[:, None, :]
+        t_dirs = chunk_rays.viewdirs[:, None, :]
+        t_mids = (tdist[:, :-1, None] + tdist[:, 1:, None]) / 2.0
+        positions = t_origins + t_dirs * t_mids
         return net.query_density(positions)
 
     results = []
@@ -246,54 +246,47 @@ def render_image(
             (n_rays, 1), far_plane, device=chunk_rays.origins.device
         )
 
-        ray_indices, t_starts, t_ends, proposal_samples = ray_marching(
+        tdist, proposal_samples = ray_marching(
             train_frac=train_frac,
             t_min=t_min,  # [n_rays, 1]
             t_max=t_max,  # [n_rays, 1]
             stratified=radiance_field.training,
             proposal_sigma_fns=[
-                lambda t_starts, t_ends, ray_indices: proposal_sigma_fn(
-                    t_starts, t_ends, ray_indices, proposal_net
-                )
+                lambda tdist: proposal_sigma_fn(tdist, proposal_net)
                 for proposal_net in proposal_nets
             ],
             num_prop_samples=64,  # The number of samples for each proposal level.
             num_nerf_samples=32,  # The number of samples the final nerf level.
         )
 
-        rgb, opacity, depth, weights = rendering(
-            t_starts,
-            t_ends,
-            ray_indices,
-            n_rays=n_rays,
-            rgb_sigma_fn=rgb_sigma_fn,
-            render_bkgd=render_bkgd,
+        rgbs, sigmas = rgb_sigma_fn(tdist)
+        weights = compute_alpha_weights(
+            sigmas.squeeze(-1),
+            tdist,
+            opaque_background=True,
+        )[0]
+
+        # Render each ray.
+        rendering = volumetric_rendering(
+            rgbs,
+            weights,
+            tdist,
+            bg_rgbs=render_bkgd if render_bkgd is not None else 1.0,
+            t_far=None,
+            compute_extras=False,
         )
 
         if radiance_field.training:
-            # packed_info = pack_info(ray_indices, n_rays=len(chunk_rays.origins))
-            # proposal_samples.append((packed_info, t_starts, t_ends, weights))
-            tdist = torch.cat(
-                [
-                    t_starts.reshape(n_rays, -1),
-                    t_ends.reshape(n_rays, -1)[:, -1:],
-                ],
-                dim=-1,
-            )
-            weights = weights.reshape(n_rays, -1)
             proposal_samples.append((tdist, weights))
 
-        chunk_results = [rgb, opacity, depth, len(t_starts)]
+        chunk_results = [rendering["rgb"]]
         results.append(chunk_results)
-    colors, opacities, depths, n_rendering_samples = [
+    (colors,) = [
         torch.cat(r, dim=0) if isinstance(r[0], torch.Tensor) else r
         for r in zip(*results)
     ]
     return (
         colors.view((*rays_shape[:-1], -1)),
-        opacities.view((*rays_shape[:-1], -1)),
-        depths.view((*rays_shape[:-1], -1)),
-        sum(n_rendering_samples),
         proposal_samples if radiance_field.training else None,
     )
 
@@ -358,45 +351,58 @@ if __name__ == "__main__":
     # setup proposal nets
     proposal_nets = torch.nn.ModuleList(
         [
-            NGPradianceField(
-                aabb=aabb,
-                unbounded=True,
-                use_viewdirs=False,
-                hidden_dim=16,
-                max_res=1024,
-                geo_feat_dim=0,
-                n_levels=4,
-                log2_hashmap_size=21,
-            ),
-            NGPradianceField(
-                aabb=aabb,
-                unbounded=True,
-                use_viewdirs=False,
-                hidden_dim=16,
-                max_res=1024,
-                geo_feat_dim=0,
-                n_levels=4,
-                log2_hashmap_size=21,
+            # NGPradianceField(
+            #     aabb=aabb,
+            #     unbounded=True,
+            #     use_viewdirs=False,
+            #     hidden_dim=64,
+            #     max_res=1024,
+            #     geo_feat_dim=0,
+            #     n_levels=16,
+            #     log2_hashmap_size=21,
+            # ),
+            # NGPradianceField(
+            #     aabb=aabb,
+            #     unbounded=True,
+            #     use_viewdirs=False,
+            #     hidden_dim=64,
+            #     max_res=1024,
+            #     geo_feat_dim=0,
+            #     n_levels=16,
+            #     log2_hashmap_size=21,
+            # ),
+            VanillaNeRFRadianceField(
+                net_depth=8, net_width=64, net_depth_condition=0
             ),
         ]
     ).to(device)
 
     # setup radiance field
-    radiance_field = NGPradianceField(aabb=aabb, unbounded=True).to(device)
+    # radiance_field = NGPradianceField(
+    #     aabb=aabb,
+    #     unbounded=True,
+    #     hidden_dim=64,
+    #     geo_feat_dim=15,
+    #     n_levels=16,
+    #     max_res=2048,
+    #     base_res=16,
+    #     log2_hashmap_size=21,
+    # ).to(device)
+    radiance_field = VanillaNeRFRadianceField().to(device)
 
     # setup the training receipe.
-    max_steps = 20000
+    max_steps = 100000
     grad_scaler = torch.cuda.amp.GradScaler(2**10)
     optimizer = torch.optim.Adam(
         [
             {
                 "params": radiance_field.parameters(),
-                "lr": 1e-2,
+                "lr": 2e-3,
                 "eps": 1e-15,
             },
             {
                 "params": proposal_nets.parameters(),
-                "lr": 1e-2,
+                "lr": 2e-3,
                 "eps": 1e-15,
             },
         ]
@@ -426,14 +432,8 @@ if __name__ == "__main__":
         pixels = data["pixels"]
 
         # render
-        (
-            rgb,
-            acc,
-            depth,
-            n_rendering_samples,
-            proposal_samples,
-        ) = render_image(
-            1.0,
+        rgb, proposal_samples = render_image(
+            float(step) / max_steps,
             radiance_field,
             rays,
             near_plane=near_plane,
@@ -469,7 +469,7 @@ if __name__ == "__main__":
             print(
                 f"elapsed_time={elapsed_time:.2f}s | step={step} | "
                 f"loss={loss:.5f} | loss_interval={loss_interval:.5f} | loss_interval={loss_dist:.5f} |"
-                f"n_rendering_samples={n_rendering_samples:d} | num_rays={len(pixels):d} |"
+                f"num_rays={len(pixels):d} |"
             )
 
         if step >= 0 and step % 1000 == 0 and step > 0:
@@ -486,8 +486,8 @@ if __name__ == "__main__":
                     pixels = data["pixels"]
 
                     # rendering
-                    rgb, acc, depth, _, _ = render_image(
-                        1.0,
+                    rgb, _ = render_image(
+                        float(step) / max_steps,
                         radiance_field,
                         rays,
                         near_plane=near_plane,
@@ -502,12 +502,6 @@ if __name__ == "__main__":
                     psnr = -10.0 * torch.log(mse) / np.log(10.0)
                     psnrs.append(psnr.item())
                     if step != max_steps:
-                        imageio.imwrite(
-                            "acc_binary_test.png",
-                            ((acc > 0).float().cpu().numpy() * 255).astype(
-                                np.uint8
-                            ),
-                        )
                         imageio.imwrite(
                             "rgb_test.png",
                             (rgb.cpu().numpy() * 255).astype(np.uint8),
