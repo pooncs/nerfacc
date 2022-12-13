@@ -106,7 +106,7 @@ class NGPradianceField(torch.nn.Module):
                             "otype": "SphericalHarmonics",
                             "degree": 4,
                         },
-                        # {"otype": "Identity", "n_bins": 4, "degree": 4},
+                        {"otype": "Identity", "n_bins": 4, "degree": 4},
                     ],
                 },
             )
@@ -212,6 +212,6 @@ class NGPradianceField(torch.nn.Module):
             assert (
                 positions.shape == directions.shape
             ), f"{positions.shape} v.s. {directions.shape}"
-            density, embedding = self.query_density(positions, return_feat=True)
-            rgb = self._query_rgb(directions, embedding=embedding)
+        density, embedding = self.query_density(positions, return_feat=True)
+        rgb = self._query_rgb(directions, embedding=embedding)
         return rgb, density
