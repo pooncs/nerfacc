@@ -371,25 +371,75 @@ def sample(
     single_jitter=False,
     deterministic_center=False,
 ):
+    device = t.device
     if not randomized:
         if deterministic_center:
             pad = 1 / (2 * num_samples)
-            u = torch.linspace(pad, 1 - pad - eps, num_samples)
+            u = torch.linspace(pad, 1 - pad - eps, num_samples, device=device)
         else:
-            u = torch.linspace(0, 1 - eps, num_samples)
+            u = torch.linspace(0, 1 - eps, num_samples, device=device)
         u = torch.broadcast_to(u, t.shape[:-1] + (num_samples,))
     else:
         u_max = eps + (1 - eps) / num_samples
         max_jitter = (1 - u_max) / (num_samples - 1) - eps
         d = 1 if single_jitter else num_samples
         u = (
-            torch.linspace(0, 1 - u_max, num_samples)
-            + torch.rand(t.shape[:-1] + (d,)) * max_jitter
+            torch.linspace(0, 1 - u_max, num_samples, device=device)
+            + torch.rand(t.shape[:-1] + (d,), device=device) * max_jitter
         )
 
-    u = u.type_as(t)
-
     return invert_cdf(u, t, w_logits)
+    # from nerfacc.cuda import invert_cdf as invert_cdf_cuda
+
+    # src_bins = torch.stack(
+    #     [
+    #         torch.arange(
+    #             0,
+    #             (t.shape[0] * (t.shape[1] - 1)),
+    #             t.shape[1] - 1,
+    #             device=t.device,
+    #             dtype=torch.int32,
+    #         ),
+    #         torch.full(
+    #             (t.shape[0],),
+    #             t.shape[1] - 1,
+    #             device=t.device,
+    #             dtype=torch.int32,
+    #         ),
+    #     ],
+    #     dim=-1,
+    # )
+    # tgt_bins = torch.stack(
+    #     [
+    #         torch.arange(
+    #             0,
+    #             (u.shape[0] * (u.shape[1] - 1)),
+    #             u.shape[1] - 1,
+    #             device=t.device,
+    #             dtype=torch.int32,
+    #         ),
+    #         torch.full(
+    #             (u.shape[0],),
+    #             u.shape[1] - 1,
+    #             device=t.device,
+    #             dtype=torch.int32,
+    #         ),
+    #     ],
+    #     dim=-1,
+    # )
+    # t0, t1 = invert_cdf_cuda(
+    #     src_bins.contiguous(),
+    #     t[:, :-1].flatten().contiguous(),
+    #     t[:, 1:].flatten().contiguous(),
+    #     torch.softmax(w_logits, dim=-1).flatten().contiguous(),
+    #     tgt_bins.contiguous(),
+    #     u[:, :-1].flatten().contiguous(),
+    #     u[:, 1:].flatten().contiguous(),
+    # )
+    # t0 = t0.reshape_as(u[:, :-1])
+    # t1 = t1.reshape_as(u[:, 1:])
+    # _t = torch.cat([t0, t1[:, -1:]], dim=-1)
+    # return _t
 
 
 # Verified

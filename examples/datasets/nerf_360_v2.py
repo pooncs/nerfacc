@@ -337,7 +337,7 @@ class SubjectLoader(torch.utils.data.Dataset):
             value=(-1.0 if self.OPENGL_CAMERA else 1.0),
         )  # [num_rays, 3]
 
-        # [n_cams, height, width, 3]
+        # [num_rays, 3]
         directions = (camera_dirs[:, None, :] * c2w[:, :3, :3]).sum(dim=-1)
         origins = torch.broadcast_to(c2w[:, :3, -1], directions.shape)
         viewdirs = directions / torch.linalg.norm(
