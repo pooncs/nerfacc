@@ -31,14 +31,14 @@ from nerfacc.reference.multinerf.render import (
 def ray_marching(
     train_frac: float,
     proposal_sigma_fns: Tuple[Callable, ...],
-    t_min=0.2,
+    t_min=0.1,
     t_max=1e6,
     stratified: bool = False,
     num_prop_samples: int = [
-        256,
-        96,
+        64,
+        64,
     ],  # The number of samples for each proposal level.
-    num_nerf_samples: int = 48,  # The number of samples the final nerf level.
+    num_nerf_samples: int = 32,  # The number of samples the final nerf level.
 ):
     num_levels = 3  # len(proposal_sigma_fns) + 1
     anneal_slope: float = 10  # Higher = more rapid annealing.
@@ -130,7 +130,7 @@ def ray_marching(
         tdist = s_to_t(sdist)
 
         if is_prop:
-            sigmas = proposal_sigma_fns[i_level](tdist)
+            sigmas = proposal_sigma_fns[0](tdist)
             # Get the weights used by volumetric rendering (and our other losses).
             weights = compute_alpha_weights(
                 sigmas.squeeze(-1),
@@ -200,8 +200,8 @@ def render_image(
                 lambda tdist: proposal_sigma_fn(tdist, proposal_net)
                 for proposal_net in proposal_nets
             ],
-            num_prop_samples=[256, 96],
-            num_nerf_samples=48,
+            num_prop_samples=[64, 64],
+            num_nerf_samples=32,
         )
 
         rgbs, sigmas = rgb_sigma_fn(tdist)
@@ -267,7 +267,7 @@ if __name__ == "__main__":
         subject_id=args.scene,
         root_fp=data_root_fp,
         split="train",
-        num_rays=4096,
+        num_rays=8192,
         **{"color_bkgd_aug": "random", "factor": 4},
     )
     train_dataset.images = train_dataset.images.to(device)
@@ -307,16 +307,16 @@ if __name__ == "__main__":
                 n_levels=5,
                 max_res=64,
             ),
-            NGPradianceField(
-                aabb=aabb,
-                unbounded=True,
-                use_viewdirs=False,
-                geo_feat_dim=0,
-                hidden_dim=16,
-                log2_hashmap_size=17,
-                n_levels=5,
-                max_res=256,
-            ),
+            # NGPradianceField(
+            #     aabb=aabb,
+            #     unbounded=True,
+            #     use_viewdirs=False,
+            #     geo_feat_dim=0,
+            #     hidden_dim=16,
+            #     log2_hashmap_size=17,
+            #     n_levels=5,
+            #     max_res=256,
+            # ),
         ]
     ).to(device)
 
@@ -391,10 +391,10 @@ if __name__ == "__main__":
         # optimizer.step()
         # scheduler.step()
 
-        lr_delay_steps = 512
+        lr_delay_steps = 1000
         lr_delay_mult = 0.01
-        lr_init = 1e-2
-        lr_final = 1e-4
+        lr_init = 5e-2
+        lr_final = 5e-4
         if lr_delay_steps > 0:
             delay_rate = lr_delay_mult + (1 - lr_delay_mult) * np.sin(
                 0.5 * np.pi * np.clip(step / lr_delay_steps, 0, 1)
