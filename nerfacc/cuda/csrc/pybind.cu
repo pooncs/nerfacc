@@ -145,6 +145,15 @@ torch::Tensor weight_from_alpha_backward_naive(
     torch::Tensor packed_info,
     torch::Tensor alphas);
 
+std::vector<torch::Tensor> invert_cdf(
+    torch::Tensor src_bins,
+    torch::Tensor s0,
+    torch::Tensor s1,
+    torch::Tensor w,
+    torch::Tensor tgt_bins,
+    torch::Tensor cdf_u0,
+    torch::Tensor cdf_u1);
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
 {
     // contraction
@@ -164,6 +173,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
     m.def("ray_marching_with_grid", &ray_marching_with_grid);
     m.def("ray_resampling", &ray_resampling);
     m.def("ray_pdf_query", &ray_pdf_query);
+    
+    // cdf
+    m.def("invert_cdf", &invert_cdf);
 
     // rendering
     m.def("is_cub_available", is_cub_available);
