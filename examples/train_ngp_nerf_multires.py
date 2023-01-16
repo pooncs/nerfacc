@@ -58,12 +58,11 @@ device = "cuda:0"
 target_sample_batch_size = 1 << 20  # train with 1M samples per batch
 grid_resolution = 256  # resolution of the occupancy grid
 grid_nlvl = 4  # number of levels of the occupancy grid
-near_plane = 0.2  # render near plane
-far_plane = 1e4  # render far plane
-render_step_size = 1e-2  # render step size
+render_step_size = 1e-3  # render step size
 alpha_thre = 1e-2  # skipping threshold on alpha
 max_steps = 30000  # training steps
 aabb_scale = 1 << (grid_nlvl - 1)  # scale up the the aabb as pesudo unbounded
+near_plane = 0.02
 
 # setup the dataset
 data_root_fp = "/home/ruilongli/data/360_v2/"
@@ -84,7 +83,8 @@ test_dataset = SubjectLoader(
     factor=4,
     device=device,
 )
-aabb = compute_camera_aabb(train_dataset, test_dataset)
+# aabb = compute_camera_aabb(train_dataset, test_dataset)
+aabb = torch.tensor([-1.0, -1.0, -1.0, 1.0, 1.0, 1.0], device=device)
 aabb_bkgd = enlarge_aabb(aabb, aabb_scale)
 
 # setup the radiance field we want to train.
@@ -172,10 +172,9 @@ for step in range(max_steps + 1):
         radiance_field,
         occupancy_grid,
         rays,
-        scene_aabb=None,
+        scene_aabb=aabb_bkgd,
         # rendering options
         near_plane=near_plane,
-        far_plane=far_plane,
         render_step_size=render_step_size,
         render_bkgd=render_bkgd,
         cone_angle=args.cone_angle,
@@ -197,16 +196,17 @@ for step in range(max_steps + 1):
     optimizer.step()
     scheduler.step()
 
-    if step % 100 == 0:
+    if step % 1000 == 0:
         elapsed_time = time.time() - tic
         loss = F.mse_loss(rgb, pixels)
         print(
             f"elapsed_time={elapsed_time:.2f}s | step={step} | "
             f"loss={loss:.5f} | "
-            f"n_rendering_samples={n_rendering_samples:d} | num_rays={len(pixels):d} |"
+            f"n_rendering_samples={n_rendering_samples:d} | num_rays={len(pixels):d} | "
+            f"depth={depth.max():.3f} | "
         )
 
-    if step >= 0 and step % 1000 == 0 and step > 0:
+    if step >= 0 and step % 2000 == 0 and step > 0:
         # evaluation
         radiance_field.eval()
 
@@ -223,10 +223,9 @@ for step in range(max_steps + 1):
                     radiance_field,
                     occupancy_grid,
                     rays,
-                    scene_aabb=None,
+                    scene_aabb=aabb_bkgd,
                     # rendering options
                     near_plane=near_plane,
-                    far_plane=far_plane,
                     render_step_size=render_step_size,
                     render_bkgd=render_bkgd,
                     cone_angle=args.cone_angle,
@@ -240,39 +239,39 @@ for step in range(max_steps + 1):
 
                 if step != max_steps:
 
-                    def nerfvis_eval_fn(x, dirs):
-                        density, embedding = radiance_field.query_density(
-                            x, return_feat=True
-                        )
-                        embedding = embedding.expand(-1, dirs.shape[1], -1)
-                        dirs = dirs.expand(embedding.shape[0], -1, -1)
-                        rgb = radiance_field._query_rgb(
-                            dirs, embedding=embedding, apply_act=False
-                        )
-                        return rgb, density
+                    # def nerfvis_eval_fn(x, dirs):
+                    #     density, embedding = radiance_field.query_density(
+                    #         x, return_feat=True
+                    #     )
+                    #     embedding = embedding.expand(-1, dirs.shape[1], -1)
+                    #     dirs = dirs.expand(embedding.shape[0], -1, -1)
+                    #     rgb = radiance_field._query_rgb(
+                    #         dirs, embedding=embedding, apply_act=False
+                    #     )
+                    #     return rgb, density
 
-                    vis.remove("nerf")
-                    vis.add_nerf(
-                        name="nerf",
-                        eval_fn=nerfvis_eval_fn,
-                        center=((aabb[3:] + aabb[:3]) / 2.0).tolist(),
-                        radius=((aabb[3:] - aabb[:3]) / 2.0).max().item(),
-                        use_dirs=True,
-                        reso=128,
-                        sigma_thresh=1.0,
-                    )
-                    vis.display(port=8889, serve_nonblocking=True)
+                    # vis.remove("nerf")
+                    # vis.add_nerf(
+                    #     name="nerf",
+                    #     eval_fn=nerfvis_eval_fn,
+                    #     center=((aabb[3:] + aabb[:3]) / 2.0).tolist(),
+                    #     radius=((aabb[3:] - aabb[:3]) / 2.0).max().item(),
+                    #     use_dirs=True,
+                    #     reso=128,
+                    #     sigma_thresh=1.0,
+                    # )
+                    # vis.display(port=8889, serve_nonblocking=True)
 
-                    imageio.imwrite(
-                        "rgb_test.png",
-                        (rgb.cpu().numpy() * 255).astype(np.uint8),
-                    )
-                    imageio.imwrite(
-                        "rgb_error.png",
-                        (
-                            (rgb - pixels).norm(dim=-1).cpu().numpy() * 255
-                        ).astype(np.uint8),
-                    )
+                    # imageio.imwrite(
+                    #     "rgb_test.png",
+                    #     (rgb.cpu().numpy() * 255).astype(np.uint8),
+                    # )
+                    # imageio.imwrite(
+                    #     "rgb_error.png",
+                    #     (
+                    #         (rgb - pixels).norm(dim=-1).cpu().numpy() * 255
+                    #     ).astype(np.uint8),
+                    # )
                     break
 
         psnr_avg = sum(psnrs) / len(psnrs)
