@@ -169,7 +169,7 @@ def ray_marching(
             device=rays_o.device,
         )
         grid_binary = torch.ones(
-            [1, 1, 1], dtype=torch.bool, device=rays_o.device
+            [1, 1, 1, 1], dtype=torch.bool, device=rays_o.device
         )
         contraction_type = ContractionType.AABB.to_cpp_version()
 

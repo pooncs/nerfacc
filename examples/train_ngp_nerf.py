@@ -134,7 +134,8 @@ if __name__ == "__main__":
     # setup the scene bounding box.
     if args.unbounded:
         print("Using unbounded rendering")
-        contraction_type = ContractionType.UN_BOUNDED_SPHERE
+        contraction_type = ContractionType.AABB
+        grid_nlvl = 4
         # contraction_type = ContractionType.UN_BOUNDED_TANH
         scene_aabb = None
         near_plane = 0.2
@@ -143,6 +144,7 @@ if __name__ == "__main__":
         alpha_thre = 1e-2
     else:
         contraction_type = ContractionType.AABB
+        grid_nlvl = 1
         scene_aabb = torch.tensor(args.aabb, dtype=torch.float32, device=device)
         near_plane = None
         far_plane = None
@@ -154,11 +156,13 @@ if __name__ == "__main__":
         alpha_thre = 0.0
 
     # setup the radiance field we want to train.
-    max_steps = 20000
+    max_steps = 30000
     grad_scaler = torch.cuda.amp.GradScaler(2**10)
     radiance_field = NGPradianceField(
-        aabb=args.aabb,
-        unbounded=args.unbounded,
+        # aabb=args.aabb,
+        # unbounded=args.unbounded,
+        aabb=[-4 * 16, -4 * 16, -4 * 16, 4 * 16, 4 * 16, 4 * 16],
+        unbounded=False,
     ).to(device)
     optimizer = torch.optim.Adam(
         radiance_field.parameters(), lr=1e-2, eps=1e-15
@@ -173,6 +177,7 @@ if __name__ == "__main__":
         roi_aabb=args.aabb,
         resolution=grid_resolution,
         contraction_type=contraction_type,
+        levels=grid_nlvl,
     ).to(device)
 
     # training
@@ -250,7 +255,7 @@ if __name__ == "__main__":
             optimizer.step()
             scheduler.step()
 
-            if step % 10000 == 0:
+            if step % 100 == 0:
                 elapsed_time = time.time() - tic
                 loss = F.mse_loss(rgb[alive_ray_mask], pixels[alive_ray_mask])
                 print(
@@ -260,7 +265,7 @@ if __name__ == "__main__":
                     f"n_rendering_samples={n_rendering_samples:d} | num_rays={len(pixels):d} |"
                 )
 
-            if step >= 0 and step % max_steps == 0 and step > 0:
+            if step >= 0 and step % 1000 == 0 and step > 0:
                 # evaluation
                 radiance_field.eval()
 
@@ -291,15 +296,23 @@ if __name__ == "__main__":
                         mse = F.mse_loss(rgb, pixels)
                         psnr = -10.0 * torch.log(mse) / np.log(10.0)
                         psnrs.append(psnr.item())
-                        # imageio.imwrite(
-                        #     "acc_binary_test.png",
-                        #     ((acc > 0).float().cpu().numpy() * 255).astype(np.uint8),
-                        # )
-                        # imageio.imwrite(
-                        #     "rgb_test.png",
-                        #     (rgb.cpu().numpy() * 255).astype(np.uint8),
-                        # )
-                        # break
+                        imageio.imwrite(
+                            "acc_binary_test.png",
+                            ((acc > 0).float().cpu().numpy() * 255).astype(
+                                np.uint8
+                            ),
+                        )
+                        imageio.imwrite(
+                            "rgb_test.png",
+                            (rgb.cpu().numpy() * 255).astype(np.uint8),
+                        )
+                        imageio.imwrite(
+                            "rgb_error.png",
+                            (
+                                (rgb - pixels).norm(dim=-1).cpu().numpy() * 255
+                            ).astype(np.uint8),
+                        )
+                        break
                 psnr_avg = sum(psnrs) / len(psnrs)
                 print(f"evaluation: psnr_avg={psnr_avg}")
                 train_dataset.training = True
