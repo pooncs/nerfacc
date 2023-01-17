@@ -210,7 +210,7 @@ def ray_marching(
             ray_indices=ray_indices,
             packed_info=packed_info,
             early_stop_eps=early_stop_eps,
-            alpha_thre=alpha_thre,
+            alpha_thre=min(alpha_thre, grid.occs.mean().item()),
             n_rays=rays_o.shape[0],
         )
         ray_indices, t_starts, t_ends = (

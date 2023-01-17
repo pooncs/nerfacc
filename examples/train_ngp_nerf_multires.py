@@ -18,12 +18,6 @@ from utils import render_image, set_random_seed
 from nerfacc import OccupancyGrid
 
 
-def compute_camera_aabb(trainset, testset) -> torch.Tensor:
-    locs = torch.cat([trainset.camtoworlds, testset.camtoworlds])[:, :3, -1]
-    aabb = torch.cat([locs.min(dim=0).values, locs.max(dim=0).values])
-    return aabb
-
-
 def enlarge_aabb(aabb, factor: float) -> torch.Tensor:
     center = (aabb[:3] + aabb[3:]) / 2
     extent = (aabb[3:] - aabb[:3]) / 2
@@ -54,13 +48,14 @@ args = parser.parse_args()
 set_random_seed(42)
 
 # hyperparameters
+# 310s 24.57psnr
 device = "cuda:0"
-target_sample_batch_size = 1 << 20  # train with 1M samples per batch
-grid_resolution = 256  # resolution of the occupancy grid
+target_sample_batch_size = 1 << 18  # train with 1M samples per batch
+grid_resolution = 128  # resolution of the occupancy grid
 grid_nlvl = 4  # number of levels of the occupancy grid
 render_step_size = 1e-3  # render step size
 alpha_thre = 1e-2  # skipping threshold on alpha
-max_steps = 30000  # training steps
+max_steps = 20000  # training steps
 aabb_scale = 1 << (grid_nlvl - 1)  # scale up the the aabb as pesudo unbounded
 near_plane = 0.02
 
@@ -83,7 +78,8 @@ test_dataset = SubjectLoader(
     factor=4,
     device=device,
 )
-# aabb = compute_camera_aabb(train_dataset, test_dataset)
+
+# The region of interest of the scene has been normalized to [-1, 1]^3.
 aabb = torch.tensor([-1.0, -1.0, -1.0, 1.0, 1.0, 1.0], device=device)
 aabb_bkgd = enlarge_aabb(aabb, aabb_scale)
 
@@ -99,55 +95,54 @@ occupancy_grid = OccupancyGrid(
     roi_aabb=aabb, resolution=grid_resolution, levels=grid_nlvl
 ).to(device)
 
-# setup visualizer
-vis = nerfvis.Scene("nerf")
+# # setup visualizer to inspect camera and aabb
+# vis = nerfvis.Scene("nerf")
 
-vis.add_camera_frustum(
-    "train_camera",
-    focal_length=train_dataset.K[0, 0].item(),
-    image_width=train_dataset.images.shape[2],
-    image_height=train_dataset.images.shape[1],
-    z=0.3,
-    r=train_dataset.camtoworlds[:, :3, :3],
-    t=train_dataset.camtoworlds[:, :3, -1],
-)
+# vis.add_camera_frustum(
+#     "train_camera",
+#     focal_length=train_dataset.K[0, 0].item(),
+#     image_width=train_dataset.images.shape[2],
+#     image_height=train_dataset.images.shape[1],
+#     z=0.3,
+#     r=train_dataset.camtoworlds[:, :3, :3],
+#     t=train_dataset.camtoworlds[:, :3, -1],
+# )
 
-p1 = aabb[:3].cpu().numpy()
-p2 = aabb[3:].cpu().numpy()
-verts, segs = [
-    [p1[0], p1[1], p1[2]],
-    [p1[0], p1[1], p2[2]],
-    [p1[0], p2[1], p2[2]],
-    [p1[0], p2[1], p1[2]],
-    [p2[0], p1[1], p1[2]],
-    [p2[0], p1[1], p2[2]],
-    [p2[0], p2[1], p2[2]],
-    [p2[0], p2[1], p1[2]],
-], [
-    [0, 1],
-    [1, 2],
-    [2, 3],
-    [3, 0],
-    [4, 5],
-    [5, 6],
-    [6, 7],
-    [7, 4],
-    [0, 4],
-    [1, 5],
-    [2, 6],
-    [3, 7],
-]
-vis.add_lines(
-    "aabb",
-    np.array(verts).astype(dtype=np.float32),
-    segs=np.array(segs),
-)
+# p1 = aabb[:3].cpu().numpy()
+# p2 = aabb[3:].cpu().numpy()
+# verts, segs = [
+#     [p1[0], p1[1], p1[2]],
+#     [p1[0], p1[1], p2[2]],
+#     [p1[0], p2[1], p2[2]],
+#     [p1[0], p2[1], p1[2]],
+#     [p2[0], p1[1], p1[2]],
+#     [p2[0], p1[1], p2[2]],
+#     [p2[0], p2[1], p2[2]],
+#     [p2[0], p2[1], p1[2]],
+# ], [
+#     [0, 1],
+#     [1, 2],
+#     [2, 3],
+#     [3, 0],
+#     [4, 5],
+#     [5, 6],
+#     [6, 7],
+#     [7, 4],
+#     [0, 4],
+#     [1, 5],
+#     [2, 6],
+#     [3, 7],
+# ]
+# vis.add_lines(
+#     "aabb",
+#     np.array(verts).astype(dtype=np.float32),
+#     segs=np.array(segs),
+# )
 
-vis.display(port=8889, serve_nonblocking=True)
+# vis.display(port=8889, serve_nonblocking=True)
 
 
 # training
-step = 0
 tic = time.time()
 for step in range(max_steps + 1):
     radiance_field.train()
