@@ -55,7 +55,7 @@ grid_resolution = 128  # resolution of the occupancy grid
 grid_nlvl = 4  # number of levels of the occupancy grid
 render_step_size = 1e-3  # render step size
 alpha_thre = 1e-2  # skipping threshold on alpha
-max_steps = 20000  # training steps
+max_steps = 50000  # training steps
 aabb_scale = 1 << (grid_nlvl - 1)  # scale up the the aabb as pesudo unbounded
 near_plane = 0.02
 
@@ -191,7 +191,7 @@ for step in range(max_steps + 1):
     optimizer.step()
     scheduler.step()
 
-    if step % 1000 == 0:
+    if step % 10000 == 0:
         elapsed_time = time.time() - tic
         loss = F.mse_loss(rgb, pixels)
         print(
@@ -201,7 +201,7 @@ for step in range(max_steps + 1):
             f"depth={depth.max():.3f} | "
         )
 
-    if step >= 0 and step % 2000 == 0 and step > 0:
+    if step >= 0 and step % max_steps == 0 and step > 0:
         # evaluation
         radiance_field.eval()
 
@@ -232,42 +232,53 @@ for step in range(max_steps + 1):
                 psnr = -10.0 * torch.log(mse) / np.log(10.0)
                 psnrs.append(psnr.item())
 
-                if step != max_steps:
+                # if step != max_steps:
 
-                    # def nerfvis_eval_fn(x, dirs):
-                    #     density, embedding = radiance_field.query_density(
-                    #         x, return_feat=True
-                    #     )
-                    #     embedding = embedding.expand(-1, dirs.shape[1], -1)
-                    #     dirs = dirs.expand(embedding.shape[0], -1, -1)
-                    #     rgb = radiance_field._query_rgb(
-                    #         dirs, embedding=embedding, apply_act=False
-                    #     )
-                    #     return rgb, density
+                #     def nerfvis_eval_fn(x, dirs):
+                #         density, embedding = radiance_field.query_density(
+                #             x, return_feat=True
+                #         )
+                #         embedding = embedding.expand(-1, dirs.shape[1], -1)
+                #         dirs = dirs.expand(embedding.shape[0], -1, -1)
+                #         rgb = radiance_field._query_rgb(
+                #             dirs, embedding=embedding, apply_act=False
+                #         )
+                #         return rgb, density
 
-                    # vis.remove("nerf")
-                    # vis.add_nerf(
-                    #     name="nerf",
-                    #     eval_fn=nerfvis_eval_fn,
-                    #     center=((aabb[3:] + aabb[:3]) / 2.0).tolist(),
-                    #     radius=((aabb[3:] - aabb[:3]) / 2.0).max().item(),
-                    #     use_dirs=True,
-                    #     reso=128,
-                    #     sigma_thresh=1.0,
-                    # )
-                    # vis.display(port=8889, serve_nonblocking=True)
+                #     vis.remove("nerf")
+                #     vis.add_nerf(
+                #         name="nerf",
+                #         eval_fn=nerfvis_eval_fn,
+                #         center=((aabb[3:] + aabb[:3]) / 2.0).tolist(),
+                #         radius=((aabb[3:] - aabb[:3]) / 2.0).max().item(),
+                #         use_dirs=True,
+                #         reso=128,
+                #         sigma_thresh=1.0,
+                #     )
+                #     vis.display(port=8889, serve_nonblocking=True)
 
-                    # imageio.imwrite(
-                    #     "rgb_test.png",
-                    #     (rgb.cpu().numpy() * 255).astype(np.uint8),
-                    # )
-                    # imageio.imwrite(
-                    #     "rgb_error.png",
-                    #     (
-                    #         (rgb - pixels).norm(dim=-1).cpu().numpy() * 255
-                    #     ).astype(np.uint8),
-                    # )
-                    break
+                #     imageio.imwrite(
+                #         "rgb_test.png",
+                #         (rgb.cpu().numpy() * 255).astype(np.uint8),
+                #     )
+                #     imageio.imwrite(
+                #         "rgb_error.png",
+                #         (
+                #             (rgb - pixels).norm(dim=-1).cpu().numpy() * 255
+                #         ).astype(np.uint8),
+                #     )
+                #     break
 
         psnr_avg = sum(psnrs) / len(psnrs)
         print(f"evaluation: psnr_avg={psnr_avg}")
+
+        # torch.save(
+        #     {
+        #         "radiance_field": radiance_field.state_dict(),
+        #         "occupancy_grid": occupancy_grid.state_dict(),
+        #         "optimizer": optimizer.state_dict(),
+        #         "scheduler": scheduler.state_dict(),
+        #         "step": step,
+        #     },
+        #     "ckpt.pt"
+        # )
