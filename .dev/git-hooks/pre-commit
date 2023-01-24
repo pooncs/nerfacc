@@ -1,0 +1,21 @@
+#!/bin/sh
+#
+# An example hook script to verify what is about to be committed.
+# Called by "git commit" with no arguments.  The hook should
+# exit with non-zero status after issuing an appropriate message if
+# it wants to stop the commit.
+#
+# To enable this hook, rename this file to "pre-commit".
+
+# Install fdfind if not available.
+command -v fdfind > /dev/null 2>&1 || sudo apt install fd-find -y
+
+# Remove all notebook outputs before committing.
+fdfind -E submodules -e ipynb -x \
+    jupyter nbconvert --ClearOutputPreprocessor.enabled=True --inplace {}
+
+# Format the code before committing.
+fdfind -E submodules -e cpp -e cu -e h -x clang-format -i {}
+fdfind -E submodules -e py -e ipynb -x isort --profile black {}
+
+git add .
