@@ -200,7 +200,7 @@ for step in range(max_steps + 1):
     optimizer.step()
     scheduler.step()
 
-    if step % 200 == 0:
+    if step % 10000 == 0:
         elapsed_time = time.time() - tic
         loss = F.mse_loss(rgb, pixels)
         print(
@@ -210,7 +210,7 @@ for step in range(max_steps + 1):
             f"depth={depth.max():.3f} | "
         )
 
-    if step >= 0 and step % 2000 == 0 and step > 0:
+    if step >= 0 and step % max_steps == 0 and step > 0:
         # evaluation
         radiance_field.eval()
 
@@ -244,7 +244,7 @@ for step in range(max_steps + 1):
                     "rgb_test.png",
                     (rgb.cpu().numpy() * 255).astype(np.uint8),
                 )
-                break
+                #  break
 
                 # if step != max_steps:
 
