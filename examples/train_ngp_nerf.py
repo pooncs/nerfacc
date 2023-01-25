@@ -145,7 +145,9 @@ if __name__ == "__main__":
     else:
         contraction_type = ContractionType.AABB
         grid_nlvl = 1
-        scene_aabb = torch.tensor(args.aabb, dtype=torch.float32, device=device)
+        scene_aabb = torch.tensor(
+            args.aabb, dtype=torch.float32, device=device
+        )
         near_plane = None
         far_plane = None
         render_step_size = (
@@ -247,7 +249,9 @@ if __name__ == "__main__":
             alive_ray_mask = acc.squeeze(-1) > 0
 
             # compute loss
-            loss = F.smooth_l1_loss(rgb[alive_ray_mask], pixels[alive_ray_mask])
+            loss = F.smooth_l1_loss(
+                rgb[alive_ray_mask], pixels[alive_ray_mask]
+            )
 
             optimizer.zero_grad()
             # do not unscale it because we are using Adam.
@@ -265,7 +269,7 @@ if __name__ == "__main__":
                     f"n_rendering_samples={n_rendering_samples:d} | num_rays={len(pixels):d} |"
                 )
 
-            if step >= 0 and step % 1000 == 0 and step > 0:
+            if step >= 0 and step % max_steps == 0 and step > 0:
                 # evaluation
                 radiance_field.eval()
 

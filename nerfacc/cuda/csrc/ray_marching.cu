@@ -14,17 +14,23 @@ inline __device__ __host__ float calc_dt(const float t, const float cone_angle,
 
 inline __device__ __host__ float mip_level(const float3 xyz,
                                            const float3 roi_min,
-                                           const float3 roi_max) {
-  float3 xyz_unit =
-      apply_contraction(xyz, roi_min, roi_max, ContractionType::AABB);
+                                           const float3 roi_max,
+                                           ContractionType type) {
+  // TODO(hangg): mip only works properly without contraction now.
+  if (type == ContractionType::AABB) {
+    float3 xyz_unit =
+        apply_contraction(xyz, roi_min, roi_max, ContractionType::AABB);
 
-  float3 scale = fabs(xyz_unit - 0.5);
-  float maxval = fmaxf(fmaxf(scale.x, scale.y), scale.z);
+    float3 scale = fabs(xyz_unit - 0.5);
+    float maxval = fmaxf(fmaxf(scale.x, scale.y), scale.z);
 
-  int exponent;
-  frexpf(maxval, &exponent);
-  int mip = max(0, exponent + 1);
-  return mip;
+    int exponent;
+    frexpf(maxval, &exponent);
+    int mip = max(0, exponent + 1);
+    return mip;
+  } else {
+    return 0;
+  }
 }
 
 inline __device__ __host__ int grid_idx_at(const float3 xyz_unit,
@@ -156,7 +162,7 @@ __global__ void ray_marching_kernel(
     // current center
     const float3 xyz = origin + t_mid * dir;
     // current mip level
-    const int mip = mip_level(xyz, roi_min, roi_max);
+    const int mip = mip_level(xyz, roi_min, roi_max, type);
     if (mip >= grid_nlvl) {
       // out of grid
       break;
@@ -164,7 +170,7 @@ __global__ void ray_marching_kernel(
     if (grid_occupied_at(xyz, roi_min, roi_max, type, mip, grid_nlvl, grid_res,
                          grid_binary)) {
       // if (is_first_round) {
-      //     printf("[occupied] t0, t_mid, mip: %f, %f, %d\n", t0, t_mid, mip);
+      //   printf("[occupied] t0, t_mid, mip: %f, %f, %d\n", t0, t_mid, mip);
       // }
       if (!is_first_round) {
         t_starts[j] = t0;
@@ -178,8 +184,8 @@ __global__ void ray_marching_kernel(
       t_mid = (t0 + t1) * 0.5f;
     } else {
       // if (is_first_round) {
-      //     printf("[not occupied] t0, t_mid, mip: %f, %f, %d\n", t0, t_mid,
-      //     mip);
+      //   printf("[not occupied] t0, t_mid, mip: %f, %f, %d\n", t0, t_mid,
+      //   mip);
       // }
       // march to next sample
       switch (type) {
@@ -313,7 +319,7 @@ __global__ void query_occ_kernel(
   const float3 roi_min = make_float3(roi[0], roi[1], roi[2]);
   const float3 roi_max = make_float3(roi[3], roi[4], roi[5]);
   const float3 xyz = make_float3(samples[0], samples[1], samples[2]);
-  const int mip = mip_level(xyz, roi_min, roi_max);
+  const int mip = mip_level(xyz, roi_min, roi_max, type);
 
   *occs = grid_occupied_at(xyz, roi_min, roi_max, type, mip, grid_nlvl,
                            grid_res, grid_value);

@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from nerfacc import OccupancyGrid, ray_marching, unpack_info
+from nerfacc import ContractionType, OccupancyGrid, ray_marching, unpack_info
 
 device = "cuda:0"
 batch_size = 128
@@ -54,7 +54,10 @@ def test_marching_with_mip_grid():
     rays_d = torch.tensor([[1.0, 1.0, 1.0]], device=device)
     rays_d = rays_d / rays_d.norm(dim=-1, keepdim=True)
     grid = OccupancyGrid(
-        roi_aabb=[-1, -1, -1, 1, 1, 1], resolution=2, levels=2
+        roi_aabb=[-1, -1, -1, 1, 1, 1],
+        resolution=2,
+        levels=1,
+        contraction_type=ContractionType.UN_BOUNDED_SPHERE,
     ).to(device)
     grid._binary[:] = True
 
@@ -71,6 +74,7 @@ def test_marching_with_mip_grid():
     )
     print("t_starts", t_starts[:, 0])
     print("samples", samples[:, 0])
+    __import__("ipdb").set_trace()
 
 
 if __name__ == "__main__":
