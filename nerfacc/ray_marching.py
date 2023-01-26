@@ -1,4 +1,4 @@
-from typing import Callable, Optional, Tuple
+from typing import Callable, Optional, Sequence, Tuple
 
 import torch
 
@@ -24,14 +24,21 @@ def ray_marching(
     # sigma/alpha function for skipping invisible space
     sigma_fn: Optional[Callable] = None,
     alpha_fn: Optional[Callable] = None,
+    #  # proposal sigma functions for importance resampling
+    #  proposal_sigma_fns: Sequence[Callable] = [],
+    #  proposal_n_samples: Sequence[int] = [],
+    #  proposal_requires_grad: bool = False,
     early_stop_eps: float = 1e-4,
     alpha_thre: float = 0.0,
     # rendering options
     near_plane: Optional[float] = None,
     far_plane: Optional[float] = None,
-    render_step_size: float = 1e-3,
     stratified: bool = False,
+    render_step_size: float = 1e-3,
     cone_angle: float = 0.0,
+    #  uniform_marching: bool = False,
+    #  contract_fn: Callable = lambda x: x,
+    #  contract_inv_fn: Callable = lambda x: x,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Ray marching with space skipping.
 
@@ -58,7 +65,7 @@ def ray_marching(
         grid: Optional. Grid that idicates where to skip during marching.
             See :class:`nerfacc.Grid` for details.
         sigma_fn: Optional. If provided, the marching will skip the invisible space
-            by evaluating the density along the ray with `sigma_fn`. It should be a 
+            by evaluating the density along the ray with `sigma_fn`. It should be a
             function that takes in samples {t_starts (N, 1), t_ends (N, 1),
             ray indices (N,)} and returns the post-activation density values (N, 1).
             You should only provide either `sigma_fn` or `alpha_fn`.
@@ -135,6 +142,11 @@ def ray_marching(
             "Only one of `alpha_fn` and `sigma_fn` should be provided."
         )
 
+    #  if uniform_marching:
+    #      assert (
+    #          cone_angle == 0.0
+    #      ), "cone_angle should be 0.0 for uniform marching."
+
     # logic for t_min and t_max:
     # 1. if t_min and t_max are given, use them with highest priority.
     # 2. if t_min and t_max are not given, but scene_aabb is given, use
@@ -206,11 +218,14 @@ def ray_marching(
 
         # Compute visibility of the samples, and filter out invisible samples
         masks = render_visibility(
-            alphas,
+            alphas,  # type: ignore
             ray_indices=ray_indices,
             packed_info=packed_info,
             early_stop_eps=early_stop_eps,
-            alpha_thre=min(alpha_thre, grid.occs.mean().item()),
+            alpha_thre=min(
+                alpha_thre,
+                grid.occs.mean().item() if grid is not None else 1e10,
+            ),
             n_rays=rays_o.shape[0],
         )
         ray_indices, t_starts, t_ends = (
