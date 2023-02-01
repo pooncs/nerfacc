@@ -44,6 +44,20 @@ that takes from `MipNerf360`_.
 | Ours (Training time) | 781s  | 745s  | 728s  | 838s  | 873s  | 797s  | 760s  | --    |
 +----------------------+-------+-------+-------+-------+-------+-------+-------+-------+
 
+target_sample_batch_size = 1 << 18  # train with 1M samples per batch
+grid_resolution = 128  # resolution of the occupancy grid
+grid_nlvl = 4  # number of levels of the occupancy grid
+render_step_size = 1e-3  # render step size
+alpha_thre = 1e-2  # skipping threshold on alpha
+max_steps = 20000  # training steps
+aabb_scale = 1 << (grid_nlvl - 1)  # scale up the the aabb as pesudo unbounded
+near_plane = 0.02
++----------------------+-------+-------+-------+-------+-------+-------+-------+-------+
+| Ours                 | 24.61 | 22.45 | 29.85 | 26.87 | 28.08 | 30.48 | 23.15 | --    |
++----------------------+-------+-------+-------+-------+-------+-------+-------+-------+
+| Ours (Training time) | 306s  | 298s  | 292s  | 331s  | 346s  | 322s  | 307s  | --    |
++----------------------+-------+-------+-------+-------+-------+-------+-------+-------+
+
 
 .. _`Instant-NGP Nerf`: https://arxiv.org/abs/2201.05989
 .. _`MipNerf360`: https://arxiv.org/abs/2111.12077

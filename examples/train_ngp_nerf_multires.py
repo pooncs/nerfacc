@@ -55,7 +55,7 @@ grid_resolution = 128  # resolution of the occupancy grid
 grid_nlvl = 4  # number of levels of the occupancy grid
 render_step_size = 1e-3  # render step size
 alpha_thre = 1e-2  # skipping threshold on alpha
-max_steps = 50000  # training steps
+max_steps = 20000  # training steps
 aabb_scale = 1 << (grid_nlvl - 1)  # scale up the the aabb as pesudo unbounded
 near_plane = 0.02
 
