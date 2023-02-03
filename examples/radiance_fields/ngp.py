@@ -2,6 +2,7 @@
 Copyright (c) 2022 Ruilong Li, UC Berkeley.
 """
 
+import math
 from typing import Callable, List, Union
 
 import torch
@@ -74,6 +75,7 @@ class NGPradianceField(torch.nn.Module):
         density_activation: Callable = lambda x: trunc_exp(x - 1),
         unbounded: bool = False,
         geo_feat_dim: int = 15,
+        base_resolution: int = 16,
         n_levels: int = 16,
         log2_hashmap_size: int = 19,
     ) -> None:
@@ -87,7 +89,9 @@ class NGPradianceField(torch.nn.Module):
         self.unbounded = unbounded
 
         self.geo_feat_dim = geo_feat_dim
-        per_level_scale = 1.4472692012786865
+        per_level_scale = math.exp(
+            math.log(4096 * 1 / base_resolution) / (n_levels - 1)
+        )  # 1.4472692012786865
 
         if self.use_viewdirs:
             self.direction_encoding = tcnn.Encoding(
@@ -113,7 +117,7 @@ class NGPradianceField(torch.nn.Module):
                 "n_levels": n_levels,
                 "n_features_per_level": 2,
                 "log2_hashmap_size": log2_hashmap_size,
-                "base_resolution": 16,
+                "base_resolution": base_resolution,
                 "per_level_scale": per_level_scale,
             },
             network_config={
@@ -138,7 +142,7 @@ class NGPradianceField(torch.nn.Module):
                 network_config={
                     "otype": "FullyFusedMLP",
                     "activation": "ReLU",
-                    "output_activation": "Sigmoid",
+                    "output_activation": "None",
                     "n_neurons": 64,
                     "n_hidden_layers": 2,
                 },
@@ -168,19 +172,21 @@ class NGPradianceField(torch.nn.Module):
         else:
             return density
 
-    def _query_rgb(self, dir, embedding):
+    def _query_rgb(self, dir, embedding, apply_act: bool = True):
         # tcnn requires directions in the range [0, 1]
         if self.use_viewdirs:
             dir = (dir + 1.0) / 2.0
-            d = self.direction_encoding(dir.view(-1, dir.shape[-1]))
-            h = torch.cat([d, embedding.view(-1, self.geo_feat_dim)], dim=-1)
+            d = self.direction_encoding(dir.reshape(-1, dir.shape[-1]))
+            h = torch.cat([d, embedding.reshape(-1, self.geo_feat_dim)], dim=-1)
         else:
-            h = embedding.view(-1, self.geo_feat_dim)
+            h = embedding.reshape(-1, self.geo_feat_dim)
         rgb = (
             self.mlp_head(h)
-            .view(list(embedding.shape[:-1]) + [3])
+            .reshape(list(embedding.shape[:-1]) + [3])
             .to(embedding)
         )
+        if apply_act:
+            rgb = torch.sigmoid(rgb)
         return rgb
 
     def forward(

@@ -20,11 +20,13 @@ def test_resampling():
         far_plane=1.0,
         render_step_size=1e-3,
     )
+    print(t_starts.shape, t_ends.shape)
     packed_info = pack_info(ray_indices, n_rays=batch_size)
     weights = torch.rand((t_starts.shape[0],), device=device)
     packed_info, t_starts, t_ends = ray_resampling(
         packed_info, t_starts, t_ends, weights, n_samples=32
     )
+    print(t_starts.shape, t_ends.shape)
     assert t_starts.shape == t_ends.shape == (batch_size * 32, 1)
 
 
