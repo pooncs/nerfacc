@@ -160,7 +160,7 @@ python examples/train_mlp_dnerf.py --train_split train --scene lego
 ```bash
 # Instant-NGP on unbounded scenes in 20 minutes!
 # See results at here: https://www.nerfacc.com/en/latest/examples/unbounded.html
-python examples/train_ngp_nerf.py --train_split train --scene garden --auto_aabb --unbounded --cone_angle=0.004
+python examples/train_ngp_nerf.py --train_split train --scene garden --unbounded --cone_angle=0.004 --aabb="-1.,-1.,-1.,1.,1.,1."
 ```
 
 Used by:

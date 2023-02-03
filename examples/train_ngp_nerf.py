@@ -137,9 +137,9 @@ if __name__ == "__main__":
         contraction_type = ContractionType.UN_BOUNDED_SPHERE
         # contraction_type = ContractionType.UN_BOUNDED_TANH
         scene_aabb = None
-        near_plane = 0.2
-        far_plane = 1e4
-        render_step_size = 1e-2
+        near_plane = 0.02
+        far_plane = 100
+        render_step_size = 1e-3
         alpha_thre = 1e-2
     else:
         contraction_type = ContractionType.AABB
