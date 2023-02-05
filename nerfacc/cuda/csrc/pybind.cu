@@ -36,6 +36,13 @@ std::vector<torch::Tensor> ray_marching_pdf(
     const torch::Tensor roi,
     const torch::Tensor grid_values);
 
+std::vector<torch::Tensor> ray_resampling_pdf(
+    torch::Tensor packed_info,
+    torch::Tensor tdists,
+    torch::Tensor accum_weights,
+    const int steps);
+
+
 torch::Tensor unpack_info(
     const torch::Tensor packed_info, const int n_samples);
 
@@ -176,6 +183,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
     m.def("ray_marching_pdf", &ray_marching_pdf);
     m.def("ray_resampling", &ray_resampling);
     m.def("ray_pdf_query", &ray_pdf_query);
+    m.def("ray_resampling_pdf", &ray_resampling_pdf);
     
     // cdf
     m.def("invert_cdf", &invert_cdf);

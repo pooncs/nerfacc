@@ -63,14 +63,14 @@ def test_invert_cdf():
 
 
 def test_ray_marching_pdf():
-    rays_o = torch.tensor([[0.1, 0.1, 0.1], [-0.1, -0.1, -0.1]], device=device)
-    rays_d = torch.tensor([[0.0, -1.0, 0.0], [0.0, 0.0, -1.0]], device=device)
+    rays_o = torch.tensor([[0.1, 0.1, 0.1], [0.2, 0.2, 0.2]], device=device)
+    rays_d = torch.tensor([[0.0, 1.0, 0.0], [0.0, -1.0, 0.0]], device=device)
 
     t_min = torch.tensor([0.0, 0.0], device=device)
-    t_max = torch.tensor([2.0, 2.0], device=device)
+    t_max = torch.tensor([1.0, 1.0], device=device)
 
     roi = torch.tensor([0.0, 0.0, 0.0, 1.0, 1.0, 1.0], device=device)
-    grid_sigmas = torch.full([3, 1, 1, 1], 3.0, device=device)
+    grid_sigmas = torch.full([2, 1, 1, 1], 3.0, device=device)
 
     packed_info, ray_indices, accum_weights, tdist = _C.ray_marching_pdf(
         rays_o,
@@ -84,6 +84,28 @@ def test_ray_marching_pdf():
     print("ray_indices", ray_indices)
     print("accum_weights", accum_weights)
     print("tdist", tdist)
+
+    resample_packed_info, resample_tdists = _C.ray_resampling_pdf(
+        packed_info, tdist, accum_weights, 5
+    )
+    print("resample_packed_info", resample_packed_info)
+    print("resample_tdists", resample_tdists)
+
+    from nerfacc.reference.multinerf.mathutil import interp
+
+    eps = torch.finfo(torch.float32).eps
+    num_samples = 5 + 1
+    pad = 1 / (2 * num_samples)
+    u = torch.linspace(pad, 1.0 - pad - eps, num_samples, device=device)
+    u = torch.broadcast_to(u, (2, num_samples))
+    accum_weights = accum_weights.reshape(2, -1)
+    accum_weights = (
+        accum_weights / accum_weights.max(dim=-1, keepdim=True).values
+    )
+    tdist = tdist.reshape(2, -1)
+    tdists_new = interp(u, accum_weights / accum_weights.max(), tdist)
+    print("u", u)
+    print("tdists_new", tdists_new)
 
 
 if __name__ == "__main__":
