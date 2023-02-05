@@ -79,8 +79,6 @@ def test_ray_marching_pdf():
         t_max,
         roi,
         grid_sigmas,
-        1e-2,
-        0.0,
     )
     print("packed_info", packed_info)
     print("ray_indices", ray_indices)

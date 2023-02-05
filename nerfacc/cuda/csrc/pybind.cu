@@ -34,10 +34,7 @@ std::vector<torch::Tensor> ray_marching_pdf(
     const torch::Tensor t_max,
     // occupancy grid & contraction
     const torch::Tensor roi,
-    const torch::Tensor grid_values,
-    // sampling
-    const float step_size,
-    const float cone_angle);
+    const torch::Tensor grid_values);
 
 torch::Tensor unpack_info(
     const torch::Tensor packed_info, const int n_samples);

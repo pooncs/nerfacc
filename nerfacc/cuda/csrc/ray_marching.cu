@@ -270,8 +270,6 @@ __global__ void ray_marching_pdf_kernel(
     const int3 grid_res,
     const float *grid_values, // shape (reso_x, reso_y, reso_z)
     // sampling
-    const float step_size,
-    const float cone_angle,
     const int *packed_info,
     // first round outputs
     int *num_steps,
@@ -374,10 +372,7 @@ std::vector<torch::Tensor> ray_marching_pdf(
     const torch::Tensor t_max,
     // occupancy grid & contraction
     const torch::Tensor roi,
-    const torch::Tensor grid_values,
-    // sampling
-    const float step_size,
-    const float cone_angle)
+    const torch::Tensor grid_values)
 {
     DEVICE_GUARD(rays_o);
 
@@ -420,8 +415,6 @@ std::vector<torch::Tensor> ray_marching_pdf(
         grid_res,
         grid_values.data_ptr<float>(),
         // sampling
-        step_size,
-        cone_angle,
         nullptr, /* packed_info */
         // outputs
         num_steps.data_ptr<int>(),
@@ -451,8 +444,6 @@ std::vector<torch::Tensor> ray_marching_pdf(
         grid_res,
         grid_values.data_ptr<float>(),
         // sampling
-        step_size,
-        cone_angle,
         packed_info.data_ptr<int>(),
         // outputs
         nullptr, /* num_steps */
