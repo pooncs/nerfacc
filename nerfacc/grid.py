@@ -402,7 +402,7 @@ class DensityAvgGrid(Grid):
     def eval_error(self, density_eval_fn: Callable):
         lvl_indices = self._get_all_cells()
         cache = torch.zeros_like(self.density)
-        num_iters = 50
+        num_iters = 10
         for _ in range(num_iters):
             for lvl, indices in enumerate(lvl_indices):
                 grid_coords = self.grid_coords[indices]
@@ -418,15 +418,16 @@ class DensityAvgGrid(Grid):
                 density = density_eval_fn(x).squeeze(-1)
                 # cell ids
                 cell_ids = lvl * self.num_cells_per_lvl + indices
-                cache[cell_ids] += density
+                cache[cell_ids] += torch.log(density)
         cache = cache / num_iters
+        cache = torch.exp(cache)
         return torch.mean(torch.abs(cache - self.density))
 
     @torch.no_grad()
     def update_dbg(self, density_eval_fn: Callable):
         lvl_indices = self._get_all_cells()
         cache = torch.zeros_like(self.density)
-        num_iters = 50
+        num_iters = 10
         for _ in range(num_iters):
             for lvl, indices in enumerate(lvl_indices):
                 grid_coords = self.grid_coords[indices]
@@ -442,9 +443,9 @@ class DensityAvgGrid(Grid):
                 density = density_eval_fn(x).squeeze(-1)
                 # cell ids
                 cell_ids = lvl * self.num_cells_per_lvl + indices
-                cache[cell_ids] += density
+                cache[cell_ids] += torch.log(density)
         cache = cache / num_iters
-        self.density.data = cache
+        self.density.data = torch.exp(cache)
         # return torch.mean(torch.abs(cache - self.density))
 
     @torch.no_grad()

@@ -222,6 +222,8 @@ def render_image_pdf(
             far_plane=far_plane,
             stratified=radiance_field.training,
         )
+        assert (t_ends > t_starts).all()
+        assert (t_ends - t_starts).min() > 1e-6, (t_ends - t_starts).min()
         rgb, opacity, depth = rendering(
             t_starts,
             t_ends,

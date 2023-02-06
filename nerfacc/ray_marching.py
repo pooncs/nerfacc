@@ -246,7 +246,7 @@ def ray_marching_resampling(
     near_plane: Optional[float] = None,
     far_plane: Optional[float] = None,
     stratified: bool = False,
-    num_samples: int = 16,
+    num_samples: int = 64,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Ray marching with space skipping."""
     if not rays_o.is_cuda:
