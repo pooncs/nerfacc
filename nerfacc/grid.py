@@ -310,6 +310,189 @@ class OccupancyGrid(Grid):
         )
 
 
+class DensityAvgGrid(Grid):
+    """Density grid: average density grid.
+
+    Args:
+        roi_aabb: The axis-aligned bounding box of the region of interest. Useful for mapping
+            the 3D space to the grid.
+        resolution: The resolution of the grid. If an integer is given, the grid is assumed to
+            be a cube. Otherwise, a list or a tensor of shape (3,) is expected. Default: 128.
+    """
+
+    NUM_DIM: int = 3
+
+    def __init__(
+        self,
+        roi_aabb: Union[List[int], torch.Tensor],
+        resolution: Union[int, List[int], torch.Tensor] = 128,
+        levels: int = 1,
+    ) -> None:
+        super().__init__()
+        if isinstance(resolution, int):
+            resolution = [resolution] * self.NUM_DIM
+        if isinstance(resolution, (list, tuple)):
+            resolution = torch.tensor(resolution, dtype=torch.int32)
+        assert isinstance(
+            resolution, torch.Tensor
+        ), f"Invalid type: {type(resolution)}"
+        assert resolution.shape == (
+            self.NUM_DIM,
+        ), f"Invalid shape: {resolution.shape}"
+
+        if isinstance(roi_aabb, (list, tuple)):
+            roi_aabb = torch.tensor(roi_aabb, dtype=torch.float32)
+        assert isinstance(
+            roi_aabb, torch.Tensor
+        ), f"Invalid type: {type(roi_aabb)}"
+        assert roi_aabb.shape == torch.Size(
+            [self.NUM_DIM * 2]
+        ), f"Invalid shape: {roi_aabb.shape}"
+
+        # total number of voxels
+        self.num_cells_per_lvl = int(resolution.prod().item())
+        self.levels = levels
+
+        # required attributes
+        self.register_buffer("_roi_aabb", roi_aabb)
+
+        # helper attributes
+        self.register_buffer("resolution", resolution)
+        self.register_buffer(
+            "density", torch.zeros(self.levels * self.num_cells_per_lvl)
+        )
+
+        # Grid coords & indices
+        grid_coords = _meshgrid3d(resolution).reshape(
+            self.num_cells_per_lvl, self.NUM_DIM
+        )
+        self.register_buffer("grid_coords", grid_coords, persistent=False)
+        grid_indices = torch.arange(self.num_cells_per_lvl)
+        self.register_buffer("grid_indices", grid_indices, persistent=False)
+
+    @torch.no_grad()
+    def _get_all_cells(self) -> List[torch.Tensor]:
+        """Returns all cells of the grid."""
+        return [self.grid_indices] * self.levels
+
+    @torch.no_grad()
+    def _sample_uniform_and_occupied_cells(self, n: int) -> List[torch.Tensor]:
+        """Samples both n uniform and occupied cells."""
+        lvl_indices = []
+        for lvl in range(self.levels):
+            uniform_indices = torch.randint(
+                self.num_cells_per_lvl, (n,), device=self.device
+            )
+            occupied_indices = torch.nonzero(self.density[lvl] > 5)
+            if len(occupied_indices) > 0:
+                if n < len(occupied_indices):
+                    selector = torch.randint(
+                        len(occupied_indices), (n,), device=self.device
+                    )
+                    occupied_indices = occupied_indices[selector]
+                if occupied_indices.dim() == 2:
+                    print(occupied_indices.shape)
+                indices = torch.cat([uniform_indices, occupied_indices], dim=0)
+            else:
+                indices = uniform_indices
+            lvl_indices.append(indices)
+        return lvl_indices
+
+    @torch.no_grad()
+    def eval_error(self, density_eval_fn: Callable):
+        lvl_indices = self._get_all_cells()
+        cache = torch.zeros_like(self.density)
+        num_iters = 10
+        for _ in range(num_iters):
+            for lvl, indices in enumerate(lvl_indices):
+                grid_coords = self.grid_coords[indices]
+                x = (
+                    grid_coords
+                    + torch.rand_like(grid_coords, dtype=torch.float32)
+                ) / self.resolution
+                # voxel coordinates [0, 1]^3 -> world
+                x = contract_inv(
+                    (x - 0.5) * (2**lvl) + 0.5,
+                    roi=self._roi_aabb,
+                )
+                density = density_eval_fn(x).squeeze(-1)
+                # cell ids
+                cell_ids = lvl * self.num_cells_per_lvl + indices
+                cache[cell_ids] += density
+        cache = cache / num_iters
+        return torch.mean(torch.abs(cache - self.density))
+
+    @torch.no_grad()
+    def _update(
+        self,
+        step: int,
+        density_eval_fn: Callable,
+        ema_decay: float = 0.8,
+        warmup_steps: int = 256,
+    ) -> None:
+        """Update the occ field in the EMA way."""
+        # sample cells
+        if step < warmup_steps:
+            lvl_indices = self._get_all_cells()
+            ema_decay = 0
+        else:
+            N = self.num_cells_per_lvl // 4
+            lvl_indices = self._sample_uniform_and_occupied_cells(N)
+
+        for lvl, indices in enumerate(lvl_indices):
+            # infer occupancy: density * step_size
+            grid_coords = self.grid_coords[indices]
+            x = (
+                grid_coords + torch.rand_like(grid_coords, dtype=torch.float32)
+            ) / self.resolution
+            # voxel coordinates [0, 1]^3 -> world
+            x = contract_inv(
+                (x - 0.5) * (2**lvl) + 0.5,
+                roi=self._roi_aabb,
+            )
+            density = density_eval_fn(x).squeeze(-1)
+            # ema update
+            cell_ids = lvl * self.num_cells_per_lvl + indices
+            self.density[cell_ids] = self.density[
+                cell_ids
+            ] * ema_decay + density * (1 - ema_decay)
+
+    @torch.no_grad()
+    def every_n_step(
+        self,
+        step: int,
+        density_eval_fn: Callable,
+        ema_decay: float = 0.8,
+        warmup_steps: int = 256,
+        n: int = 16,
+    ) -> None:
+        """Update the grid every n steps during training.
+
+        Args:
+            step: Current training step.
+            density_eval_fn: A function that takes in sample locations :math:`(N, 3)` and
+                returns the occupancy values :math:`(N, 1)` at those locations.
+            ema_decay: The decay rate for EMA updates. Default: 0.95.
+            warmup_steps: Sample all cells during the warmup stage. After the warmup
+                stage we change the sampling strategy to 1/4 uniformly sampled cells
+                together with 1/4 occupied cells. Default: 256.
+            n: Update the grid every n steps. Default: 16.
+        """
+        if not self.training:
+            raise RuntimeError(
+                "You should only call this function only during training. "
+                "Please call _update() directly if you want to update the "
+                "field during inference."
+            )
+        if step % n == 0 and self.training:
+            self._update(
+                step=step,
+                density_eval_fn=density_eval_fn,
+                ema_decay=ema_decay,
+                warmup_steps=warmup_steps,
+            )
+
+
 def _meshgrid3d(
     res: torch.Tensor, device: Union[torch.device, str] = "cpu"
 ) -> torch.Tensor:

@@ -110,6 +110,8 @@ def proposal_sampling_with_filter(
     proposal_sigma_fns: Tuple[Callable, ...] = [],
     proposal_n_samples: Tuple[int, ...] = [],
     proposal_require_grads: bool = False,
+    t_to_s_fn: Callable = lambda x: x,
+    s_to_t_fn: Callable = lambda x: x,
     # acceleration options
     early_stop_eps: float = 1e-4,
     alpha_thre: float = 0.0,
@@ -122,12 +124,17 @@ def proposal_sampling_with_filter(
     if n_rays is None:
         n_rays = ray_indices.max() + 1
 
-    # compute density from proposal fns
+    # Compute density from proposal fns
     proposal_samples = []
     for proposal_fn, n_samples in zip(proposal_sigma_fns, proposal_n_samples):
+<<<<<<< HEAD
 
         # compute weights for resampling
         sigmas = proposal_fn(t_starts, t_ends, ray_indices)
+=======
+        # Compute weights for resampling
+        sigmas = proposal_fn(t_starts, t_ends, ray_indices.long())
+>>>>>>> proposal
         assert (
             sigmas.shape == t_starts.shape
         ), "sigmas must have shape of (N, 1)! Got {}".format(sigmas.shape)
@@ -160,13 +167,20 @@ def proposal_sampling_with_filter(
                     (packed_info, t_starts, t_ends, weights)
                 )
 
-        # resampling on filtered samples
-        packed_info, t_starts, t_ends = ray_resampling(
-            packed_info, t_starts, t_ends, weights, n_samples=n_samples
+        # Resampling on filtered samples
+        packed_info, s_starts, s_ends = ray_resampling(
+            packed_info,
+            t_to_s_fn(t_starts),
+            t_to_s_fn(t_ends),
+            weights + 0.01,
+            n_samples=n_samples,
         )
+        t_starts = s_to_t_fn(s_starts)
+        t_ends = s_to_t_fn(s_ends)
         ray_indices = unpack_info(packed_info, t_starts.shape[0])
 
     # last round filtering with sigma_fn
+    # TODO: we may want to skip this during inference?
     if (alpha_thre > 0 or early_stop_eps > 0) and (sigma_fn is not None):
         sigmas = sigma_fn(t_starts, t_ends, ray_indices)
         assert (

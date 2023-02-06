@@ -319,7 +319,7 @@ __global__ void ray_marching_pdf_kernel(
     while (t < far)
     {
         // current center
-        const float3 xyz = origin + t * dir;
+        const float3 xyz = origin + (t + 1e-6) * dir;
         // current mip level: FIXME
         const int mip = mip_level(xyz, roi_min, roi_max, ContractionType::AABB);
         // printf("mip: %d, grid_nlvl: %d, t: %f\n", mip, grid_nlvl, t);
@@ -329,6 +329,7 @@ __global__ void ray_marching_pdf_kernel(
         }
         
         float t_step = distance_to_next_voxel(xyz, dir, inv_dir, mip, roi_min, roi_max, grid_res);
+        t_step += 1e-6;
         // printf("i: %d, j: %d, mip: %d, t: %f, t_step: %f\n", i, j,  mip, t, t_step);
         if (!is_first_round) {
             // printf("j, t, mip: %d, %f, %d\n", j, t, mip);

@@ -85,11 +85,14 @@ def test_ray_marching_pdf():
     print("accum_weights", accum_weights)
     print("tdist", tdist)
 
-    resample_packed_info, resample_tdists = _C.ray_resampling_pdf(
-        packed_info, tdist, accum_weights, 5
-    )
+    (
+        resample_packed_info,
+        resample_starts,
+        resample_ends,
+    ) = _C.ray_resampling_pdf(packed_info, tdist, accum_weights, 5)
     print("resample_packed_info", resample_packed_info)
-    print("resample_tdists", resample_tdists)
+    print("resample_starts", resample_starts)
+    print("resample_ends", resample_ends)
 
     from nerfacc.reference.multinerf.mathutil import interp
 

@@ -264,7 +264,8 @@ __global__ void cdf_resampling_pdf_kernel(
     const scalar_t *tdists, // input t
     const scalar_t *accum_weights,      // accu transmittance weights
     const int *resample_packed_info,
-    scalar_t *resample_tdists)
+    scalar_t *resample_starts,
+    scalar_t *resample_ends)
 {
     CUDA_GET_THREAD_ID(i, n_rays);
 
@@ -278,17 +279,18 @@ __global__ void cdf_resampling_pdf_kernel(
 
     tdists += base;
     accum_weights += base;
-    resample_tdists += resample_base;
+    resample_starts += resample_base;
+    resample_ends += resample_base;
 
     // normalize weights **per ray**
     scalar_t w_sum = accum_weights[steps - 1];
 
-    scalar_t cdf_pad = 1.0f / (2 * resample_steps);
-    scalar_t cdf_step_size = (1.0f - 2 * cdf_pad) / (resample_steps - 1);
+    scalar_t cdf_pad = 1.0f / (2 * (resample_steps + 1));
+    scalar_t cdf_step_size = (1.0f - 2 * cdf_pad) / resample_steps;
 
     int idx = 0, j = 0;
     scalar_t cdf_u = cdf_pad;
-    while (j < resample_steps)
+    while (j < (resample_steps + 1))
     {
         scalar_t cdf_prev = accum_weights[idx] / w_sum;
         scalar_t cdf_next = accum_weights[idx + 1] / w_sum;
@@ -296,7 +298,10 @@ __global__ void cdf_resampling_pdf_kernel(
         {
             scalar_t scaling = (tdists[idx + 1] - tdists[idx]) / (cdf_next - cdf_prev);
             scalar_t t = (cdf_u - cdf_prev) * scaling + tdists[idx];
-            resample_tdists[j] = t;
+            if (j < resample_steps)
+                resample_starts[j] = t;
+            if (j > 0)
+                resample_ends[j - 1] = t;
             j += 1;
             cdf_u = j * cdf_step_size + cdf_pad;
             // printf("cdf_u, idx, j: %f, %d, %d\n", cdf_u, idx, j);
@@ -312,7 +317,7 @@ __global__ void cdf_resampling_pdf_kernel(
             }
         }
     }
-    if (j != resample_steps)
+    if (j != (resample_steps + 1))
     {
         printf("Error: %d %d %f\n", j, resample_steps, w_sum);
     }
@@ -470,14 +475,15 @@ std::vector<torch::Tensor> ray_resampling_pdf(
     const int blocks = CUDA_N_BLOCKS_NEEDED(n_rays, threads);
 
     torch::Tensor num_steps = torch::split(packed_info, 1, 1)[1];
-    torch::Tensor resample_num_steps = (num_steps > 0).to(num_steps.options()) * (steps + 1);
+    torch::Tensor resample_num_steps = (num_steps > 0).to(num_steps.options()) * steps;
     // torch::Tensor resample_num_steps = torch::clamp(num_steps, 0, steps);
     torch::Tensor resample_cum_steps = resample_num_steps.cumsum(0, torch::kInt32);
     torch::Tensor resample_packed_info = torch::cat(
         {resample_cum_steps - resample_num_steps, resample_num_steps}, 1);
 
     int total_steps = resample_cum_steps[resample_cum_steps.size(0) - 1].item<int>();
-    torch::Tensor resample_tdists = torch::zeros({total_steps, 1}, tdists.options());
+    torch::Tensor resample_starts = torch::zeros({total_steps, 1}, tdists.options());
+    torch::Tensor resample_ends = torch::zeros({total_steps, 1}, tdists.options());
 
     AT_DISPATCH_FLOATING_TYPES_AND_HALF(
         accum_weights.scalar_type(),
@@ -491,9 +497,10 @@ std::vector<torch::Tensor> ray_resampling_pdf(
                accum_weights.data_ptr<scalar_t>(),
                resample_packed_info.data_ptr<int>(),
                // outputs
-               resample_tdists.data_ptr<scalar_t>()); }));
+               resample_starts.data_ptr<scalar_t>(),
+               resample_ends.data_ptr<scalar_t>()); }));
 
-    return {resample_packed_info, resample_tdists};
+    return {resample_packed_info, resample_starts, resample_ends};
 }
 
 
