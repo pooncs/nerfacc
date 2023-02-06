@@ -199,12 +199,6 @@ def render_image_pdf(
     else:
         num_rays, _ = rays_shape
 
-    def sigma_fn(t_starts, t_ends, ray_indices):
-        t_origins = chunk_rays.origins[ray_indices]
-        t_dirs = chunk_rays.viewdirs[ray_indices]
-        positions = t_origins + t_dirs * (t_starts + t_ends) / 2.0
-        return radiance_field.query_density(positions)
-
     def rgb_sigma_fn(t_starts, t_ends, ray_indices):
         t_origins = chunk_rays.origins[ray_indices]
         t_dirs = chunk_rays.viewdirs[ray_indices]
@@ -224,7 +218,6 @@ def render_image_pdf(
             chunk_rays.viewdirs,
             scene_aabb=scene_aabb,
             grid=density_grid,
-            sigma_fn=sigma_fn,
             near_plane=near_plane,
             far_plane=far_plane,
             stratified=radiance_field.training,

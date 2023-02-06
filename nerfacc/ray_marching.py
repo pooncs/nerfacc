@@ -242,8 +242,6 @@ def ray_marching_resampling(
     scene_aabb: Optional[torch.Tensor] = None,
     # binarized grid for skipping empty space
     grid: Optional[Grid] = None,
-    # sigma/alpha function for skipping invisible space
-    sigma_fn: Optional[Callable] = None,
     # rendering options
     near_plane: Optional[float] = None,
     far_plane: Optional[float] = None,

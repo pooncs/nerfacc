@@ -334,7 +334,7 @@ __global__ void ray_marching_pdf_kernel(
         if (!is_first_round) {
             // printf("j, t, mip: %d, %f, %d\n", j, t, mip);
             float density = grid_occupied_at(
-                origin + (t + t_step) * 0.5 * dir, 
+                origin + (t + t_step * 0.5) * dir, 
                 roi_min, roi_max, ContractionType::AABB, mip, grid_nlvl, grid_res, grid_values);
             float alpha = 1.0f - __expf(-density * t_step);
             float weight = alpha * T;

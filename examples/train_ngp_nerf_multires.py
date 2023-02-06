@@ -106,9 +106,9 @@ scheduler = torch.optim.lr_scheduler.ChainedScheduler(
 occupancy_grid = OccupancyGrid(
     roi_aabb=aabb, resolution=grid_resolution, levels=grid_nlvl
 ).to(device)
-# density_grid = DensityAvgGrid(
-#     roi_aabb=aabb, resolution=grid_resolution, levels=grid_nlvl
-# ).to(device)
+density_grid = DensityAvgGrid(
+    roi_aabb=aabb, resolution=grid_resolution, levels=grid_nlvl
+).to(device)
 
 # # setup visualizer to inspect camera and aabb
 # vis = nerfvis.Scene("nerf")
@@ -176,13 +176,17 @@ for step in range(max_steps + 1):
 
     # update occupancy grid
     occupancy_grid.every_n_step(step=step, occ_eval_fn=occ_eval_fn)
-    # density_grid.every_n_step(
-    #     step=step,
-    #     density_eval_fn=radiance_field.query_density,
-    # )
-    # if step % 100 == 0:
-    #     with torch.no_grad():
-    #         grid_err = density_grid.eval_error(radiance_field.query_density)
+    if step % 100 == 0:
+        density_grid.update_dbg(radiance_field.query_density)
+        grid_err = density_grid.eval_error(radiance_field.query_density)
+        _rgb, _, _, _ = render_image_pdf(
+            radiance_field,
+            density_grid,
+            rays,
+            scene_aabb=aabb_bkgd,
+            # rendering options
+            near_plane=near_plane,
+        )
 
     # render
     rgb, acc, depth, n_rendering_samples = render_image(
@@ -197,15 +201,6 @@ for step in range(max_steps + 1):
         cone_angle=args.cone_angle,
         alpha_thre=alpha_thre,
     )
-
-    # _rgb, _, _, _ = render_image_pdf(
-    #     radiance_field,
-    #     density_grid,
-    #     rays,
-    #     scene_aabb=aabb_bkgd,
-    #     # rendering options
-    #     near_plane=near_plane,
-    # )
 
     # dynamic batch size for rays to keep sample batch size constant.
     num_rays = len(pixels)
@@ -222,20 +217,20 @@ for step in range(max_steps + 1):
     optimizer.step()
     scheduler.step()
 
-    if step % 10000 == 0:
+    if step % 100 == 0:
         elapsed_time = time.time() - tic
         loss = F.mse_loss(rgb, pixels)
-        # _loss = F.mse_loss(_rgb, pixels)
+        _loss = F.mse_loss(_rgb, pixels)
         print(
             f"elapsed_time={elapsed_time:.2f}s | step={step} | "
             f"loss={loss:.5f} | "
             f"n_rendering_samples={n_rendering_samples:d} | num_rays={len(pixels):d} | "
             f"depth={depth.max():.3f} | "
-            # f"grid_err: {grid_err:.3f} | "
-            # f"_loss={_loss:.5f} | "
+            f"grid_err: {grid_err:.3f} | "
+            f"_loss={_loss:.5f} | "
         )
 
-    if step >= 0 and step % max_steps == 0 and step > 0:
+    if step >= 0 and step % 1000 == 0 and step > 0:
         # evaluation
         radiance_field.eval()
 
@@ -291,17 +286,27 @@ for step in range(max_steps + 1):
                 #     )
                 #     vis.display(port=8889, serve_nonblocking=True)
 
-                #     imageio.imwrite(
-                #         "rgb_test.png",
-                #         (rgb.cpu().numpy() * 255).astype(np.uint8),
-                #     )
-                #     imageio.imwrite(
-                #         "rgb_error.png",
-                #         (
-                #             (rgb - pixels).norm(dim=-1).cpu().numpy() * 255
-                #         ).astype(np.uint8),
-                #     )
-                #     break
+                rgb, _, _, _ = render_image_pdf(
+                    radiance_field,
+                    density_grid,
+                    rays,
+                    scene_aabb=aabb_bkgd,
+                    # rendering options
+                    near_plane=near_plane,
+                    test_chunk_size=8192,
+                )
+
+                imageio.imwrite(
+                    "rgb_test.png",
+                    (rgb.cpu().numpy() * 255).astype(np.uint8),
+                )
+                imageio.imwrite(
+                    "rgb_error.png",
+                    ((rgb - pixels).norm(dim=-1).cpu().numpy() * 255).astype(
+                        np.uint8
+                    ),
+                )
+                break
 
         psnr_avg = sum(psnrs) / len(psnrs)
         print(f"evaluation: psnr_avg={psnr_avg}")
@@ -314,5 +319,5 @@ for step in range(max_steps + 1):
         #         "scheduler": scheduler.state_dict(),
         #         "step": step,
         #     },
-        #     "ckpt.pt"
+        #     "ckpt.pt",
         # )
