@@ -60,7 +60,8 @@ aabb_scale = 1 << (grid_nlvl - 1)  # scale up the the aabb as pesudo unbounded
 near_plane = 0.02
 
 # setup the dataset
-data_root_fp = "/home/ruilongli/data/360_v2/"
+#  data_root_fp = "/home/ruilongli/data/360_v2/"
+data_root_fp = "/shared/hangg/datasets/360_v2/"
 train_dataset = SubjectLoader(
     subject_id=args.scene,
     root_fp=data_root_fp,
