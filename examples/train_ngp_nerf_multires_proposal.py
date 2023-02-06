@@ -1,9 +1,9 @@
 """
 Copyright (c) 2022 Ruilong Li, UC Berkeley.
 """
-
 import argparse
 import time
+from typing import Optional, Tuple
 
 import imageio
 import nerfvis
@@ -12,11 +12,92 @@ import torch
 import torch.nn.functional as F
 import tqdm
 from datasets.nerf_360_v2 import SubjectLoader
+from datasets.utils import Rays, namedtuple_map
 from radiance_fields.ngp import NGPradianceField
-from utils import render_image, render_image_pdf, set_random_seed
+from utils import set_random_seed
 
-from nerfacc import OccupancyGrid
+from nerfacc import rendering
 from nerfacc.grid import DensityAvgGrid
+from nerfacc.ray_marching import ray_marching_resampling
+
+
+def render_image(
+    # scene
+    radiance_field: torch.nn.Module,
+    density_grid: DensityAvgGrid,
+    rays: Rays,
+    scene_aabb: torch.Tensor,
+    # rendering options
+    near_plane: Optional[float] = None,
+    far_plane: Optional[float] = None,
+    render_step_size: float = 1e-3,
+    render_bkgd: Optional[torch.Tensor] = None,
+    cone_angle: float = 0.0,
+    alpha_thre: float = 0.0,
+    # test options
+    test_chunk_size: int = 8192,
+):
+    """Render the pixels of an image."""
+    rays_shape = rays.origins.shape
+    if len(rays_shape) == 3:
+        height, width, _ = rays_shape
+        num_rays = height * width
+        rays = namedtuple_map(
+            lambda r: r.reshape([num_rays] + list(r.shape[2:])), rays
+        )
+    else:
+        num_rays, _ = rays_shape
+
+    def sigma_fn(t_starts, t_ends, ray_indices):
+        t_origins = chunk_rays.origins[ray_indices]
+        t_dirs = chunk_rays.viewdirs[ray_indices]
+        positions = t_origins + t_dirs * (t_starts + t_ends) / 2.0
+        return radiance_field.query_density(positions)
+
+    def rgb_sigma_fn(t_starts, t_ends, ray_indices):
+        t_origins = chunk_rays.origins[ray_indices]
+        t_dirs = chunk_rays.viewdirs[ray_indices]
+        positions = t_origins + t_dirs * (t_starts + t_ends) / 2.0
+        return radiance_field(positions, t_dirs)
+
+    results = []
+    chunk = (
+        torch.iinfo(torch.int32).max
+        if radiance_field.training
+        else test_chunk_size
+    )
+    for i in range(0, num_rays, chunk):
+        chunk_rays = namedtuple_map(lambda r: r[i : i + chunk], rays)
+        ray_indices, t_starts, t_ends = ray_marching_resampling(
+            chunk_rays.origins,
+            chunk_rays.viewdirs,
+            scene_aabb=scene_aabb,
+            grid=density_grid,
+            sigma_fn=sigma_fn,
+            near_plane=near_plane,
+            far_plane=far_plane,
+            stratified=radiance_field.training,
+        )
+        rgb, opacity, depth = rendering(
+            t_starts,
+            t_ends,
+            ray_indices,
+            n_rays=chunk_rays.origins.shape[0],
+            rgb_sigma_fn=rgb_sigma_fn,
+            render_bkgd=render_bkgd,
+        )
+        chunk_results = [rgb, opacity, depth, len(t_starts)]
+        results.append(chunk_results)
+    colors, opacities, depths, n_rendering_samples = [
+        torch.cat(r, dim=0) if isinstance(r[0], torch.Tensor) else r
+        for r in zip(*results)
+    ]
+    return (
+        colors.view((*rays_shape[:-1], -1)),
+        opacities.view((*rays_shape[:-1], -1)),
+        depths.view((*rays_shape[:-1], -1)),
+        sum(n_rendering_samples),
+    )
 
 
 def enlarge_aabb(aabb, factor: float) -> torch.Tensor:
@@ -87,28 +168,14 @@ aabb_bkgd = enlarge_aabb(aabb, aabb_scale)
 # setup the radiance field we want to train.
 radiance_field = NGPradianceField(aabb=aabb_bkgd).to(device)
 optimizer = torch.optim.Adam(radiance_field.parameters(), lr=1e-2, eps=1e-15)
-scheduler = torch.optim.lr_scheduler.ChainedScheduler(
-    [
-        torch.optim.lr_scheduler.LinearLR(
-            optimizer, start_factor=0.01, total_iters=100
-        ),
-        torch.optim.lr_scheduler.MultiStepLR(
-            optimizer,
-            milestones=[
-                max_steps // 2,
-                max_steps * 3 // 4,
-                max_steps * 9 // 10,
-            ],
-            gamma=0.33,
-        ),
-    ]
+scheduler = torch.optim.lr_scheduler.MultiStepLR(
+    optimizer,
+    milestones=[max_steps // 2, max_steps * 3 // 4, max_steps * 9 // 10],
+    gamma=0.33,
 )
-occupancy_grid = OccupancyGrid(
+density_grid = DensityAvgGrid(
     roi_aabb=aabb, resolution=grid_resolution, levels=grid_nlvl
 ).to(device)
-# density_grid = DensityAvgGrid(
-#     roi_aabb=aabb, resolution=grid_resolution, levels=grid_nlvl
-# ).to(device)
 
 # # setup visualizer to inspect camera and aabb
 # vis = nerfvis.Scene("nerf")
@@ -169,25 +236,17 @@ for step in range(max_steps + 1):
     rays = data["rays"]
     pixels = data["pixels"]
 
-    def occ_eval_fn(x):
-        step_size = render_step_size
-        density = radiance_field.query_density(x)
-        return density * step_size
-
-    # update occupancy grid
-    occupancy_grid.every_n_step(step=step, occ_eval_fn=occ_eval_fn)
-    # density_grid.every_n_step(
-    #     step=step,
-    #     density_eval_fn=radiance_field.query_density,
-    # )
-    # if step % 100 == 0:
-    #     with torch.no_grad():
-    #         grid_err = density_grid.eval_error(radiance_field.query_density)
+    # update density grid
+    density_grid.every_n_step(
+        step=step, density_eval_fn=radiance_field.query_density
+    )
+    if step % 100 == 0:
+        grid_err = density_grid.eval_error(radiance_field.query_density)
 
     # render
     rgb, acc, depth, n_rendering_samples = render_image(
         radiance_field,
-        occupancy_grid,
+        density_grid,
         rays,
         scene_aabb=aabb_bkgd,
         # rendering options
@@ -198,21 +257,12 @@ for step in range(max_steps + 1):
         alpha_thre=alpha_thre,
     )
 
-    # _rgb, _, _, _ = render_image_pdf(
-    #     radiance_field,
-    #     density_grid,
-    #     rays,
-    #     scene_aabb=aabb_bkgd,
-    #     # rendering options
-    #     near_plane=near_plane,
-    # )
-
     # dynamic batch size for rays to keep sample batch size constant.
-    num_rays = len(pixels)
-    num_rays = int(
-        num_rays * (target_sample_batch_size / float(n_rendering_samples))
-    )
-    train_dataset.update_num_rays(num_rays)
+    # num_rays = len(pixels)
+    # num_rays = int(
+    #     num_rays * (target_sample_batch_size / float(n_rendering_samples))
+    # )
+    # train_dataset.update_num_rays(num_rays)
 
     # compute loss
     loss = F.smooth_l1_loss(rgb, pixels)
@@ -222,17 +272,15 @@ for step in range(max_steps + 1):
     optimizer.step()
     scheduler.step()
 
-    if step % 10000 == 0:
+    if step % 100 == 0:
         elapsed_time = time.time() - tic
         loss = F.mse_loss(rgb, pixels)
-        # _loss = F.mse_loss(_rgb, pixels)
         print(
             f"elapsed_time={elapsed_time:.2f}s | step={step} | "
             f"loss={loss:.5f} | "
             f"n_rendering_samples={n_rendering_samples:d} | num_rays={len(pixels):d} | "
             f"depth={depth.max():.3f} | "
-            # f"grid_err: {grid_err:.3f} | "
-            # f"_loss={_loss:.5f} | "
+            f"grid_err: {grid_err:.3f} | "
         )
 
     if step >= 0 and step % max_steps == 0 and step > 0:
@@ -250,7 +298,7 @@ for step in range(max_steps + 1):
                 # rendering
                 rgb, acc, depth, _ = render_image(
                     radiance_field,
-                    occupancy_grid,
+                    density_grid,
                     rays,
                     scene_aabb=aabb_bkgd,
                     # rendering options
