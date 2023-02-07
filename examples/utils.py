@@ -8,6 +8,7 @@ from typing import Optional, Tuple
 import numpy as np
 import torch
 from datasets.utils import Rays, namedtuple_map
+from torch_efficient_distloss import flatten_eff_distloss
 
 from nerfacc import OccupancyGrid, pack_info, ray_marching, rendering
 from nerfacc.grid import DensityAvgGrid
@@ -149,7 +150,7 @@ def render_image(
             alpha_thre=alpha_thre,
         )
         # print("t_starts", t_starts.sum())
-        rgb, opacity, depth = rendering(
+        rgb, opacity, depth, weights = rendering(
             t_starts,
             t_ends,
             ray_indices,
@@ -157,6 +158,14 @@ def render_image(
             rgb_sigma_fn=rgb_sigma_fn,
             render_bkgd=render_bkgd,
         )
+        if radiance_field.training:
+            # distloss = flatten_eff_distloss(
+            #     weights.flatten(),
+            #     (t_starts + t_ends).flatten() * 0.5,
+            #     (t_ends - t_starts).flatten(),
+            #     ray_indices,
+            # )
+            distloss = None
         # if radiance_field.training:
         #     packed_info = pack_info(ray_indices, n_rays=len(chunk_rays.origins))
         #     proposal_samples.append((packed_info, t_starts, t_ends, weights))
@@ -171,7 +180,7 @@ def render_image(
         opacities.view((*rays_shape[:-1], -1)),
         depths.view((*rays_shape[:-1], -1)),
         sum(n_rendering_samples),
-        # proposal_samples if radiance_field.training else None,
+        distloss if radiance_field.training else None,
     )
 
 
@@ -222,8 +231,8 @@ def render_image_pdf(
             far_plane=far_plane,
             stratified=radiance_field.training,
         )
-        assert (t_ends > t_starts).all()
-        assert (t_ends - t_starts).min() > 1e-6, (t_ends - t_starts).min()
+        # assert (t_ends > t_starts).all()
+        # assert (t_ends - t_starts).min() > 1e-6, (t_ends - t_starts).min()
         rgb, opacity, depth = rendering(
             t_starts,
             t_ends,
