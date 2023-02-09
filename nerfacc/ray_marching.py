@@ -348,7 +348,7 @@ def ray_marching_with_proposal(
         prop_weights.append(weights)
 
         annealed_weights = torch.pow(weights, prop_anneal)
-        sdists, _, _ = pdf_sampling(
+        sdists = pdf_sampling_cu(
             sdists,
             annealed_weights,
             n_samples,
@@ -409,6 +409,28 @@ def ray_marching_with_proposal_flatten(
             single_jitter=single_jitter,
         )
     return sdists, prop_weights, prop_sdists, prop_packed_info
+
+
+@torch.no_grad()
+def pdf_sampling_cu(
+    t: torch.Tensor,
+    weights: torch.Tensor,
+    n_samples: int,
+    padding: float = 0.01,
+    stratified: bool = False,
+    single_jitter: bool = False,
+):
+    assert t.shape[0] == weights.shape[0]
+    assert t.shape[1] == weights.shape[1] + 1
+    t_new = _C.pdf_sampling(
+        t.contiguous(),
+        weights.contiguous(),
+        n_samples + 1,  # be careful here!
+        padding,
+        stratified,
+        single_jitter,
+    )
+    return t_new
 
 
 @torch.no_grad()
