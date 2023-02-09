@@ -596,3 +596,113 @@ std::vector<torch::Tensor> invert_cdf(
 
     return {t0, t1};
 }
+
+
+//--
+
+
+template <typename scalar_t>
+__global__ void merge_t_kernel(
+    // inputs
+    const uint32_t n_rays,
+    const uint32_t n_samples,
+    const float threshold,
+    const scalar_t *t,
+    // outputs
+    int *packed_info,
+    int *num_steps,
+    scalar_t *t_new)
+{
+    CUDA_GET_THREAD_ID(i, n_rays);
+
+    bool is_first_round = (packed_info == nullptr);
+
+    // locate
+    t += i * n_samples;
+
+    if (is_first_round)
+    {
+        num_steps += i;
+    }
+    else
+    {
+        int base = packed_info[i * 2 + 0];
+        t_new += base;
+    }
+
+    int cnt = 1;
+    scalar_t t0 = t[0];
+    if (!is_first_round) {
+        t_new[0] = t0;
+    }
+    for (int j = 1; j < n_samples; ++j) {
+        if ((t[j] - t0) > threshold) {
+            if (!is_first_round) {
+                t_new[cnt] = t[j];
+            }
+            // we have a sample that is large enough
+            cnt++;
+            // for next sample
+            t0 = t[j];
+        }
+    }
+    
+    if(is_first_round){
+        *num_steps = cnt;   
+    }
+    return;
+}
+
+std::vector<torch::Tensor> merge_t(
+    torch::Tensor t,  // [n_rays, n_samples]
+    float threshold)
+{
+    DEVICE_GUARD(t);
+
+    const uint32_t n_rays = t.size(0);
+    const uint32_t n_samples = t.size(1);
+
+    const int threads = 256;
+    const int blocks = CUDA_N_BLOCKS_NEEDED(n_rays, threads);
+
+    // helper counter
+    torch::Tensor num_steps = torch::empty(
+        {n_rays}, t.options().dtype(torch::kInt32));
+
+    AT_DISPATCH_FLOATING_TYPES_AND_HALF(
+        t.scalar_type(),
+        "merge_t",
+        ([&]
+         { merge_t_kernel<scalar_t><<<blocks, threads, 0, at::cuda::getCurrentCUDAStream()>>>(
+               n_rays,
+               n_samples,
+               threshold,
+               // inputs
+               t.data_ptr<scalar_t>(),
+               // outputs
+               nullptr, /* packed_info */
+               num_steps.data_ptr<int>(), /* num_steps */
+               nullptr); })); /* t_new */
+
+    torch::Tensor cum_steps = num_steps.cumsum(0, torch::kInt32);
+    torch::Tensor packed_info = torch::stack({cum_steps - num_steps, num_steps}, 1);
+    int total_steps = cum_steps[cum_steps.size(0) - 1].item<int>();
+    torch::Tensor t_new = torch::empty({total_steps}, t.options());
+
+    AT_DISPATCH_FLOATING_TYPES_AND_HALF(
+        t.scalar_type(),
+        "merge_t",
+        ([&]
+         { merge_t_kernel<scalar_t><<<blocks, threads, 0, at::cuda::getCurrentCUDAStream()>>>(
+               n_rays,
+               n_samples,
+               threshold,
+               // inputs
+               t.data_ptr<scalar_t>(),
+               // outputs
+               packed_info.data_ptr<int>(),
+               nullptr,  /* num_steps */
+               t_new.data_ptr<scalar_t>()); }));
+
+    return {packed_info, t_new};
+}

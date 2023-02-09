@@ -307,3 +307,161 @@ def ray_marching_resampling(
     # exit()
 
     return ray_indices, t_starts, t_ends
+
+
+@torch.no_grad()
+def ray_marching_with_proposal(
+    n_rays: int,
+    device: torch.device,
+    # proposal
+    prop_weight_fns: Tuple[Callable],
+    prop_n_samples: Tuple[int],
+    prop_anneal: float = 1.0,
+    # rendering options
+    n_samples: int = 32,
+    stratified: bool = False,
+    single_jitter: bool = False,
+) -> Tuple[torch.Tensor]:
+    """Ray marching with proposal PDF resampling."""
+    assert (
+        len(prop_weight_fns) == len(prop_n_samples) and len(prop_weight_fns) > 0
+    ), "The number of `prop_weight_fns` must match the number of `prop_n_samples`."
+    prop_n_samples = list(prop_n_samples)
+    prop_n_samples.append(n_samples)
+    n_samples = prop_n_samples.pop(0)
+
+    # initial sampling: [n_rays, n_samples+1]
+    sdists = torch.linspace(0.0, 1.0, n_samples + 1, device=device)[None, :]
+    sdists = torch.broadcast_to(sdists, (n_rays, sdists.shape[1]))
+    if stratified:
+        d = 1 if single_jitter else sdists.shape[1]
+        max_jitter = 0.5 / n_samples
+        sdists = sdists + torch.rand((n_rays, d), device=device) * max_jitter
+        sdists = torch.clamp(sdists, 0.0, 1.0)
+
+    # proposal sampling
+    prop_weights = []
+    prop_sdists = []
+    for weight_fn, n_samples in zip(prop_weight_fns, prop_n_samples):
+        prop_sdists.append(sdists)
+        weights = weight_fn(sdists)
+        prop_weights.append(weights)
+
+        annealed_weights = torch.pow(weights, prop_anneal)
+        sdists, _, _ = pdf_sampling(
+            sdists,
+            annealed_weights,
+            n_samples,
+            padding=0.01,
+            stratified=stratified,
+            single_jitter=single_jitter,
+        )
+    return sdists, prop_weights, prop_sdists
+
+
+@torch.no_grad()
+def ray_marching_with_proposal_flatten(
+    n_rays: int,
+    device: torch.device,
+    # proposal
+    prop_weight_fns: Tuple[Callable],
+    prop_n_samples: Tuple[int],
+    prop_anneal: float = 1.0,
+    # rendering options
+    n_samples: int = 32,
+    stratified: bool = False,
+    single_jitter: bool = False,
+) -> Tuple[torch.Tensor]:
+    """Ray marching with proposal PDF resampling."""
+    assert (
+        len(prop_weight_fns) == len(prop_n_samples) and len(prop_weight_fns) > 0
+    ), "The number of `prop_weight_fns` must match the number of `prop_n_samples`."
+    prop_n_samples = list(prop_n_samples)
+    prop_n_samples.append(n_samples)
+    n_samples = prop_n_samples.pop(0)
+
+    # initial sampling: [n_rays, n_samples+1]
+    sdists = torch.linspace(0.0, 1.0, n_samples + 1, device=device)[None, :]
+    sdists = torch.broadcast_to(sdists, (n_rays, sdists.shape[1]))
+    if stratified:
+        d = 1 if single_jitter else sdists.shape[1]
+        max_jitter = 0.5 / n_samples
+        sdists = sdists + torch.rand((n_rays, d), device=device) * max_jitter
+        sdists = torch.clamp(sdists, 0.0, 1.0)
+
+    # proposal sampling
+    prop_weights = []
+    prop_sdists = []
+    prop_packed_info = []
+    for weight_fn, n_samples in zip(prop_weight_fns, prop_n_samples):
+        prop_sdists.append(sdists)
+        prop_packed_info.append(packed_info)
+        weights = weight_fn(packed_info, sdists)
+        prop_weights.append(weights)
+
+        annealed_weights = torch.pow(weights, prop_anneal)
+        _, packed_info, sdists = pdf_sampling(
+            sdists,
+            annealed_weights,
+            n_samples,
+            padding=0.01,
+            stratified=stratified,
+            single_jitter=single_jitter,
+        )
+    return sdists, prop_weights, prop_sdists, prop_packed_info
+
+
+@torch.no_grad()
+def pdf_sampling(
+    t: torch.Tensor,
+    weights: torch.Tensor,
+    n_samples: int,
+    padding: float = 0.01,
+    stratified: bool = False,
+    single_jitter: bool = False,
+):
+    assert t.shape[0] == weights.shape[0]
+    assert t.shape[1] == weights.shape[1] + 1
+
+    eps = torch.finfo(torch.float32).eps
+    device = t.device
+
+    padding = max(padding, 1e-6)  # prevent all-zero weights
+    weights = weights + padding
+
+    pdf = weights / weights.sum(dim=-1, keepdim=True)
+    cdf = torch.min(torch.ones_like(pdf), torch.cumsum(pdf, dim=-1))
+    cdf = torch.cat([torch.zeros_like(cdf[..., :1]), cdf], dim=-1)
+
+    if stratified:
+        # `u` is in [0, 1) --- it can be zero, but it can never be 1.
+        # u_max = eps + (1 - eps) / (n_samples + 1)
+        # max_jitter = (1 - u_max) / n_samples - eps
+        u_max = 1.0 / (n_samples + 1)
+        max_jitter = 1.0 / (n_samples + 1)
+        d = 1 if single_jitter else (n_samples + 1)
+        u = (
+            torch.linspace(0, 1.0 - u_max, n_samples + 1, device=device)
+            + torch.rand(t.shape[:-1] + (d,), device=device) * max_jitter
+        )
+    else:
+        u = torch.linspace(0, 1.0 - eps, n_samples + 1, device=device)
+        u = torch.broadcast_to(u, t.shape[:-1] + (n_samples + 1,))
+
+    cdf = cdf.contiguous()
+    u = u.contiguous()
+    inds = torch.searchsorted(cdf, u, side="right")
+    below = torch.clamp(inds - 1, 0, t.shape[-1] - 1)
+    above = torch.clamp(inds, 0, t.shape[-1] - 1)
+    cdf_g0 = torch.gather(cdf, -1, below)
+    bins_g0 = torch.gather(t, -1, below)
+    cdf_g1 = torch.gather(cdf, -1, above)
+    bins_g1 = torch.gather(t, -1, above)
+    c = torch.clip(torch.nan_to_num((u - cdf_g0) / (cdf_g1 - cdf_g0), 0), 0, 1)
+    t_new = bins_g0 + c * (bins_g1 - bins_g0)
+
+    return t_new
+
+    # packed_info, t_merged = _C.merge_t(t_new, 1e-2)
+    # packed_info, t_merged = _C.merge_t(t_new.contiguous(), 1e-3)
+    # return t_new, packed_info, t_merged

@@ -164,6 +164,18 @@ std::vector<torch::Tensor> invert_cdf(
     torch::Tensor cdf_u0,
     torch::Tensor cdf_u1);
 
+std::vector<torch::Tensor> merge_t(
+    torch::Tensor t,  // [n_rays, n_samples]
+    float threshold);
+
+torch::Tensor pdf_sampling(
+    torch::Tensor ts,
+    torch::Tensor weights,
+    int64_t n_samples,
+    float padding,
+    bool stratified,
+    bool single_jitter);
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
 {
     // contraction
@@ -209,4 +221,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
     m.def("unpack_data", &unpack_data);
     m.def("unpack_info", &unpack_info);
     m.def("unpack_info_to_mask", &unpack_info_to_mask);
+
+    // merge
+    m.def("merge_t", &merge_t);
+    m.def("pdf_sampling", &pdf_sampling);
 }

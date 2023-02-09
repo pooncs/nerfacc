@@ -73,3 +73,6 @@ unpack_info_to_mask = _make_lazy_cuda_func("unpack_info_to_mask")
 invert_cdf = _make_lazy_cuda_func("invert_cdf")
 ray_pdf_query = _make_lazy_cuda_func("ray_pdf_query")
 ray_resampling_pdf = _make_lazy_cuda_func("ray_resampling_pdf")
+
+merge_t = _make_lazy_cuda_func("merge_t")
+pdf_sampling = _make_lazy_cuda_func("pdf_sampling")

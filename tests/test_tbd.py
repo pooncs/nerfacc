@@ -111,6 +111,74 @@ def test_ray_marching_pdf():
     print("tdists_new", tdists_new)
 
 
+def test_merge_t():
+    t = torch.linspace(0, 0.1, 12, device=device)
+    t = torch.stack([t, t], dim=0)
+
+    packed_info, t_merged = _C.merge_t(t, 1e-2)
+    print("packed_info", packed_info)
+    print("t_merged", t_merged)
+
+
+def test_pdf_resampling():
+    import tqdm
+
+    ts = torch.linspace(0, 0.1, 128, device=device)
+    ts = ts.expand([40960, -1])
+    weights = torch.rand_like(ts[:, :-1])
+
+    n_samples = 128
+    padding = 0.01
+    stratified = False
+    single_jitter = False
+
+    ts_new = _C.pdf_sampling(
+        ts.contiguous(),
+        weights.contiguous(),
+        n_samples + 1,
+        padding,
+        stratified,
+        single_jitter,
+    )
+    torch.cuda.synchronize()
+    for _ in tqdm.tqdm(range(1000)):
+        ts_new = _C.pdf_sampling(
+            ts.contiguous(),
+            weights.contiguous(),
+            n_samples + 1,
+            padding,
+            stratified,
+            single_jitter,
+        )
+        torch.cuda.synchronize()
+    print(ts_new)
+
+    from nerfacc.ray_marching import pdf_sampling as nerfacc_pdf_sampling
+
+    ts_new2 = nerfacc_pdf_sampling(
+        ts,
+        weights,
+        n_samples,
+        padding,
+        stratified,
+        single_jitter,
+    )
+    torch.cuda.synchronize()
+    for _ in tqdm.tqdm(range(1000)):
+        ts_new2 = nerfacc_pdf_sampling(
+            ts,
+            weights,
+            n_samples,
+            padding,
+            stratified,
+            single_jitter,
+        )
+        torch.cuda.synchronize()
+    print(ts_new2)
+
+
 if __name__ == "__main__":
     # test_invert_cdf()
-    test_ray_marching_pdf()
+    # test_ray_marching_pdf()
+    # test_merge_t()
+    test_pdf_resampling()
