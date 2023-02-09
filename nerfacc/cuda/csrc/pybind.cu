@@ -169,9 +169,9 @@ std::vector<torch::Tensor> merge_t(
     float threshold);
 
 torch::Tensor pdf_sampling(
-    torch::Tensor ts,
-    torch::Tensor weights,
-    int64_t n_samples,
+    torch::Tensor ts, // [n_rays, n_samples_in]
+    torch::Tensor weights, // [n_rays, n_samples_in - 1]
+    int64_t n_samples, // n_samples_out
     float padding,
     bool stratified,
     bool single_jitter);

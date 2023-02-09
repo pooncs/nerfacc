@@ -123,15 +123,17 @@ def test_merge_t():
 def test_pdf_resampling():
     import tqdm
 
+    torch.manual_seed(42)
     ts = torch.linspace(0, 0.1, 128, device=device)
-    ts = ts.expand([40960, -1])
+    ts = ts.expand([40960, -1]).clone()
     weights = torch.rand_like(ts[:, :-1])
 
     n_samples = 128
     padding = 0.01
-    stratified = False
-    single_jitter = False
+    stratified = True
+    single_jitter = True
 
+    torch.manual_seed(42)
     ts_new = _C.pdf_sampling(
         ts.contiguous(),
         weights.contiguous(),
@@ -140,6 +142,7 @@ def test_pdf_resampling():
         stratified,
         single_jitter,
     )
+
     torch.cuda.synchronize()
     for _ in tqdm.tqdm(range(1000)):
         ts_new = _C.pdf_sampling(
@@ -155,6 +158,7 @@ def test_pdf_resampling():
 
     from nerfacc.ray_marching import pdf_sampling as nerfacc_pdf_sampling
 
+    torch.manual_seed(42)
     ts_new2 = nerfacc_pdf_sampling(
         ts,
         weights,
@@ -175,6 +179,7 @@ def test_pdf_resampling():
         )
         torch.cuda.synchronize()
     print(ts_new2)
+    print((ts_new - ts_new2).abs().max())
 
 
 if __name__ == "__main__":
